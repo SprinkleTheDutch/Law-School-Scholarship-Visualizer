@@ -5453,11 +5453,12 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         show_med = pred_med if pred_med else _aba_p50
         show_p75 = pred_p75 if pred_med else aba_p75
 
-        # If using adjusted ABA median (not KNN), scale p25/p75 proportionally
-        if not pred_med and show_med and _aba_p50 and _aba_p50 != show_med:
+        # Scale p25/p75 proportionally whenever the median was adjusted
+        # (either ABA fallback OR KNN with no nearby p25/p75)
+        if show_med and _aba_p50 and _aba_p50 != show_med:
             scale = show_med / _aba_p50
-            if aba_p25: show_p25 = int(aba_p25 * scale)
-            if aba_p75: show_p75 = int(aba_p75 * scale)
+            if pred_p25 is None and aba_p25: show_p25 = int(aba_p25 * scale)
+            if pred_p75 is None and aba_p75: show_p75 = int(aba_p75 * scale)
 
         # Only show box if we have some prediction value
         if show_med is not None:
