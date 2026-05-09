@@ -3646,25 +3646,36 @@ def get_prediction(slug, u_lsat, u_gpa, user_state=None):
     df_schol = df_s[df_s['scholarship'] > 0].copy()
     if len(df_schol) >= 5:
         df_schol['_dist'] = (((df_schol['lsat']-u_lsat)/60)**2 + ((df_schol['gpa']-u_gpa)/2)**2)**0.5
-        n_nearby = int((df_schol['_dist'] <= ((3/60)**2 + (0.15/2)**2)**0.5).sum())
-        if n_nearby >= 15:
-            k = max(30, int(len(df_schol) * 0.2))
-            neighbors = df_schol.nsmallest(k, '_dist')
-            pred_med = neighbors['scholarship'].median()
-            aba_pct_r = grant_data.get(slug, {}).get('pct_receiving')
-            label = f"lsd.law KNN ({n_nearby} nearby · {aba_pct_r:.0f}% receive aid per ABA)" if aba_pct_r else f"lsd.law KNN ({n_nearby} nearby)"
-            # Determine tier from predicted amount vs tuition
-            si = school_info.get(slug, {})
-            _t = si.get('tuition') or si.get('tuition_res') or (si.get('credit_oos') or si.get('credit_res') or 0) * 31
-            full_3yr = (_t * 3) if _t else None
-            tier = None
-            if full_3yr:
-                ratio = pred_med / full_3yr
-                if ratio >= 1.0:   tier = 'gt_full'
-                elif ratio >= 0.9: tier = 'full'
-                elif ratio >= 0.45: tier = 'half_to_full'
-                else:               tier = 'lt_half'
-            return pred_med, label, n_nearby, tier
+        n_nearby = int((df_schol['_dist'] <= ((7/60)**2 + (0.35/2)**2)**0.5).sum())
+        if n_nearby >= 5:
+            # If user is significantly above the school's 75th LSAT, KNN may
+            # underpredict because few reporters represent true outlier offers.
+            # In that case, trust ABA tier system instead.
+            adm_check = admissions_data.get(slug, {})
+            _lsat75 = adm_check.get('lsat75')
+            _gpa75  = adm_check.get('gpa75')
+            _lsat_outlier = _lsat75 and (u_lsat - _lsat75) >= 6
+            _gpa_outlier  = _gpa75  and (u_gpa  - _gpa75)  >= 0.1
+            use_knn_over_aba = not (_lsat_outlier and _gpa_outlier)
+
+            if use_knn_over_aba:
+                k = max(30, int(len(df_schol) * 0.2))
+                neighbors = df_schol.nsmallest(k, '_dist')
+                pred_med = neighbors['scholarship'].median()
+                aba_pct_r = grant_data.get(slug, {}).get('pct_receiving')
+                label = f"lsd.law KNN ({n_nearby} nearby · {aba_pct_r:.0f}% receive aid per ABA)" if aba_pct_r else f"lsd.law KNN ({n_nearby} nearby)"
+                # Determine tier from predicted amount vs tuition
+                si = school_info.get(slug, {})
+                _t = si.get('tuition') or si.get('tuition_res') or (si.get('credit_oos') or si.get('credit_res') or 0) * 31
+                full_3yr = (_t * 3) if _t else None
+                tier = None
+                if full_3yr:
+                    ratio = pred_med / full_3yr
+                    if ratio >= 1.0:    tier = 'gt_full'
+                    elif ratio >= 0.9:  tier = 'full'
+                    elif ratio >= 0.45: tier = 'half_to_full'
+                    else:               tier = 'lt_half'
+                return pred_med, label, n_nearby, tier
 
     # --- Fall back to tier-adjusted ABA ---
     g = grant_data.get(slug, {})
@@ -3681,14 +3692,28 @@ def get_prediction(slug, u_lsat, u_gpa, user_state=None):
         gpa_iqr  = max(0.01, gpa75 - gpa25)
         lsat_z = (u_lsat - (lsat75 + lsat25) / 2) / (lsat_iqr / 1.35)
         gpa_z  = (u_gpa  - (gpa75  + gpa25)  / 2) / (gpa_iqr  / 1.35)
-        # Weight LSAT 80/20 since it drives merit scholarships more than GPA
-        combined_z = lsat_z * 0.8 + gpa_z * 0.2
-        # Bonus for being above the 75th percentile LSAT — schools aggressively
-        # recruit outlier applicants with large scholarships
+        # 70/30 weighting
+        combined_z = lsat_z * 0.7 + gpa_z * 0.3
+        # Bonus for LSAT above 75th (schools recruit outlier applicants)
         if u_lsat > lsat75:
-            points_above_75 = u_lsat - lsat75
-            combined_z += points_above_75 * 0.15
+            combined_z += (u_lsat - lsat75) / lsat_iqr * 0.5
+        # Stronger penalty for GPA below 25th (schools protect median stats)
+        if u_gpa < gpa25:
+            combined_z -= (gpa25 - u_gpa) / gpa_iqr * 1.0
+        # Moderate penalty for GPA below median (between 25th and 50th)
+        elif u_gpa < (gpa75 + gpa25) / 2:
+            combined_z -= ((gpa75 + gpa25) / 2 - u_gpa) / gpa_iqr * 0.4
         pct_receiving = (g.get('pct_receiving') or 0) / 100
+        # If pct_receiving is missing, estimate from tier data
+        if not pct_receiving:
+            gt_n = g.get('gt_full_n') or 0; fp_n = g.get('full_n') or 0
+            hf_n = g.get('half_to_full_n') or 0; lt_n = g.get('lt_half_n') or 0
+            total_recv = gt_n + fp_n + hf_n + lt_n
+            total_students = g.get('total_students') or 0
+            if total_students > 0 and total_recv > 0:
+                pct_receiving = total_recv / total_students
+            else:
+                pct_receiving = 0.75  # reasonable default
         if pct_receiving > 0:
             rank_among_recipients = max(0, min(1,
                 (norm_cdf(combined_z) - (1 - pct_receiving)) / pct_receiving
@@ -5421,6 +5446,7 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         pred_med = pred_p25 = pred_p75 = None
         source_label = None
         pct_got = None
+        p25_from_knn = p75_from_knn = False
 
         if u_lsat and u_gpa:
             pred_med, source_label, n_nearby, pred_tier = get_prediction(selected_slug, u_lsat, u_gpa, user_state)
@@ -5434,31 +5460,43 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                 df_schol = df_s[df_s['scholarship'] > 0].copy()
                 if len(df_schol) >= 5:
                     df_schol['_dist'] = (((df_schol['lsat']-u_lsat)/60)**2 + ((df_schol['gpa']-u_gpa)/2)**2)**0.5
-                    n_near = int((df_schol['_dist'] <= ((3/60)**2+(0.15/2)**2)**0.5).sum())
-                    if n_near >= 15:
+                    n_near = int((df_schol['_dist'] <= ((7/60)**2+(0.35/2)**2)**0.5).sum())
+                    if n_near >= 5:
                         k = max(30, int(len(df_schol)*0.2))
                         nb = df_schol.nsmallest(k, '_dist')
                         pred_p25 = nb['scholarship'].quantile(0.25)
                         pred_p75 = nb['scholarship'].quantile(0.75)
-                # Fall back to ABA p25/p75 if no KNN
-                if pred_p25 is None: pred_p25 = aba_p25
-                if pred_p75 is None: pred_p75 = aba_p75
+                # Track whether p25/p75 came from KNN or ABA fallback
+                p25_from_knn = pred_p25 is not None
+                p75_from_knn = pred_p75 is not None
+                if not p25_from_knn: pred_p25 = aba_p25
+                if not p75_from_knn: pred_p75 = aba_p75
                 aba_pct_r = g.get('pct_receiving')
                 pct_got = (aba_pct_r / 100) if aba_pct_r else None
 
         # Use prediction if available
         use_knn = pred_med is not None and source_label and 'lsd.law' in source_label
-        _aba_p50 = (g.get("p50") or 0) * 3 or None  # raw ABA for fallback display
+        _aba_p50 = (g.get("p50") or 0) * 3 or None
         show_p25 = pred_p25 if pred_med else aba_p25
         show_med = pred_med if pred_med else _aba_p50
         show_p75 = pred_p75 if pred_med else aba_p75
 
         # Scale p25/p75 proportionally whenever the median was adjusted
-        # (either ABA fallback OR KNN with no nearby p25/p75)
+        # and p25/p75 came from ABA (not KNN)
         if show_med and _aba_p50 and _aba_p50 != show_med:
             scale = show_med / _aba_p50
-            if pred_p25 is None and aba_p25: show_p25 = int(aba_p25 * scale)
-            if pred_p75 is None and aba_p75: show_p75 = int(aba_p75 * scale)
+            if not p25_from_knn and aba_p25: show_p25 = int(aba_p25 * scale)
+            if not p75_from_knn and aba_p75: show_p75 = int(aba_p75 * scale)
+            # Cap p75 at full tuition 3yr and p25 at 0
+            _si2 = school_info.get(selected_slug, {})
+            _t2 = _si2.get('tuition') or _si2.get('tuition_res') or (_si2.get('credit_oos') or _si2.get('credit_res') or 0) * 31
+            _full_3yr = _t2 * 3 if _t2 else None
+            if _full_3yr:
+                if show_p75: show_p75 = min(show_p75, int(_full_3yr * 1.05))
+            if show_p25: show_p25 = max(0, show_p25)
+            # Ensure ordering: p25 <= median <= p75
+            if show_p25 and show_p25 > show_med: show_p25 = int(show_med * 0.8)
+            if show_p75 and show_p75 < show_med: show_p75 = int(show_med * 1.1)
 
         # Only show box if we have some prediction value
         if show_med is not None:
@@ -5498,8 +5536,8 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                     df_c = df_check.dropna(subset=['lsat','gpa','scholarship'])
                     df_c = df_c[df_c['scholarship'] > 0].copy()
                     df_c['_dist'] = (((df_c['lsat']-u_lsat)/60)**2 + ((df_c['gpa']-u_gpa)/2)**2)**0.5
-                    n_near = int((df_c['_dist'] <= ((3/60)**2 + (0.15/2)**2)**0.5).sum())
-                    msg = f"⚠ Only {n_near} nearby applicants on lsd.law (need 15+) — using adjusted ABA estimate"
+                    n_near = int((df_c['_dist'] <= ((7/60)**2+(0.35/2)**2)**0.5).sum())
+                    msg = f"⚠ Only {n_near} nearby applicants on lsd.law (need 5+) — using adjusted ABA estimate"
                 elif n_schol > 0:
                     msg = f"⚠ Only {n_schol} scholarship reports on lsd.law — using adjusted ABA estimate"
                 else:
