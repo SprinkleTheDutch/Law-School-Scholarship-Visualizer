@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from dash import Dash, dcc, html, Input, Output, State, ALL, ctx, no_update
 import plotly.express as px
 import plotly.graph_objects as go
@@ -42,74 +43,63 @@ df['scholarship'] = pd.to_numeric(df['scholarship'], errors='coerce')
 
 df = df.dropna(subset=['lsat', 'gpa'])
 
+# Pre-group by school slug for fast KNN lookup in comparison table
+_df_by_school = {slug: grp for slug, grp in df.groupby('school_slug')}
+
 # --- DISPLAY NAMES ---
 slug_map = {
-    "university-of-akron-school-of-law": "Akron",
-    "albany-law-school": "Albany",
-    "american-university-law-school": "American",
-    "asu-law": "Arizona State",
-    "boston-college-law-school": "Boston College",
-    "boston-university-law-school": "Boston University",
-    "byu-law-school": "BYU",
-    "brooklyn-law-school": "Brooklyn",
-    "uc-berkeley-law-school": "UC Berkeley",
-    "uc-davis-law-school": "UC Davis",
-    "uc-irvine-law": "UC Irvine",
-    "ucla-law": "UC Los Angeles",
-    "uc-law-san-francisco": "UCSF (Hastings)",
-    "cardozo-school-of-law": "Cardozo",
-    "case-western-reserve-university-school-of-law": "Case Western Reserve",
-    "chapman-university-fowler-school-of-law": "Chapman",
-    "chicago-law-school": "Uchicago",
-    "colorado-law": "Colorado",
-    "columbia-law-school": "Columbia",
-    "uconn-law-school": "Connecticut",
-    "cornell-law-school": "Cornell",
-    "university-of-dayton-school-of-law": "Dayton",
-    "denver-law-school": "Denver",
-    "drexel-university-thomas-r-kline-school-of-law": "Drexel",
-    "duke-law": "Duke",
-    "emory-law-school": "Emory",
-    "fordham-law-school": "Fordham",
-    "antonin-scalia-law-school": "George Mason",
-    "gw-law-school": "George Washington",
-    "georgetown-law": "Georgetown",
-    "uga-law-school": "Georgia",
-    "harvard-law-school": "Harvard",
-    "university-of-idaho-college-of-law": "Idaho",
-    "iowa-law": "Iowa",
-    "loyola-law-school-los-angeles": "LMU LA",
-    "marquette-university-law-school": "Marquette",
-    "michigan-law-school": "Michigan",
-    "university-of-minnesota-law-school": "Minnesota",
-    "nyu-law-school": "NYU",
-    "unc-law-school": "North Carolina",
-    "northeastern-law-school": "Northeastern",
-    "northwestern-law-school": "Northwestern",
-    "notre-dame-law-school": "Notre Dame",
-    "penn-law": "Upenn",
-    "university-of-richmond-school-of-law": "Richmond",
-    "roger-williams-university-school-of-law": "Roger Williams",
-    "usd-law-school": "San Diego",
-    "santa-clara-university-school-of-law": "Santa Clara",
-    "university-of-south-carolina-school-of-law": "South Carolina",
-    "south-texas-college-of-law-houston": "South Texas (Houston)",
-    "usc-gould-school-of-law": "USC",
-    "smu-dedman-school-of-law": "SMU",
-    "stanford-law-school": "Stanford",
-    "texas-am-law-school": "Texas A&M",
-    "ut-austin-law-school": "Texas",
-    "moritz-college-of-law": "Ohio State",
-    "vanderbilt-law-school": "Vanderbilt",
-    "uva-law-school": "UVA",
-    "wake-forest-law-school": "Wake Forest",
-    "washburn-university-school-of-law": "Washburn",
-    "washington-and-lee-law-school": "Washington and Lee",
-    "washington-university-school-of-law": "WashU",
-    "willamette-university-college-of-law": "Willamette University",
-    "william-and-mary-law-school": "William & Mary",
-    "wisconsin-law-school": "Wisconsin",
-    "yale-law-school": "Yale",
+    "cornell-law-school":                        "Cornell Law",
+    "duke-law":                                  "Duke Law",
+    "chicago-law-school":                        "Chicago Law",
+    "uva-law-school":                            "UVA Law",
+    "columbia-law-school":                       "Columbia Law",
+    "northwestern-law-school":                   "Northwestern Law",
+    "penn-law":                                  "Penn Carey Law",
+    "harvard-law-school":                        "Harvard Law",
+    "michigan-law-school":                       "Michigan Law",
+    "uc-berkeley-law-school":                    "Berkeley Law",
+    "nyu-law-school":                            "NYU Law",
+    "georgetown-law":                            "Georgetown Law",
+    "stanford-law-school":                       "Stanford Law",
+    "usc-gould-school-of-law":                   "USC Gould",
+    "vanderbilt-law-school":                     "Vanderbilt Law",
+    "notre-dame-law-school":                     "Notre Dame Law",
+    "ut-austin-law-school":                      "UT Austin Law",
+    "yale-law-school":                           "Yale Law",
+    "ucla-law":                                  "UCLA Law",
+    "fordham-law-school":                        "Fordham Law",
+    "boston-college-law-school":                 "Boston College Law",
+    "washington-university-school-of-law":       "WashU Law",
+    "boston-university-law-school":              "Boston University Law",
+    "emory-law-school":                          "Emory Law",
+    "uc-irvine-law":                             "UC Irvine Law",
+    "gw-law-school":                             "GW Law",
+    "washington-and-lee-law-school":             "Washington & Lee Law",
+    "unc-law-school":                            "UNC Law",
+    "byu-law-school":                            "BYU Law",
+    "uc-law-san-francisco":                      "UC Law SF",
+    "uc-davis-law-school":                       "UC Davis Law",
+    "wake-forest-law-school":                    "Wake Forest Law",
+    "uga-law-school":                            "UGA Law",
+    "moritz-college-of-law":                     "Ohio State Law",
+    "university-of-minnesota-law-school":        "Minnesota Law",
+    "colorado-law":                              "Colorado Law",
+    "iowa-law":                                  "Iowa Law",
+    "northeastern-law-school":                   "Northeastern Law",
+    "cardozo-school-of-law":                     "Cardozo Law",
+    "william-and-mary-law-school":               "William & Mary Law",
+    "university-of-washington-school-of-law":    "UW Law",
+    "loyola-law-school-los-angeles":             "Loyola LA Law",
+    "antonin-scalia-law-school":                 "Scalia Law",
+    "texas-am-law-school":                       "Texas A&M Law",
+    "american-university-law-school":            "American Law",
+    "asu-law":                                   "ASU Law",
+    "usd-law-school":                            "USD Law",
+    "wisconsin-law-school":                      "Wisconsin Law",
+    "uconn-law-school":                          "UConn Law",
+    "university-of-arizona-law-school":          "Arizona Law",
+    "denver-law-school":                         "Denver Law",
+    "chapman-university-fowler-school-of-law":   "Chapman Law",
 }
 
 medians = {
@@ -415,9 +405,21 @@ outcomes = {
     "american-university-law-school":        {"grads":315, "biglaw_n":51,  "biglaw_pct":0.16, "mid_n":7,  "small_n":6,  "fed_clerk_n":7,  "fed_clerk_pct":0.02, "state_clerk_n":46},
 }
 
+# Pre-compute employment rankings for each metric
+def _rank_outcomes(key, reverse=True):
+    """Return dict of slug -> rank (1=best) for a given metric."""
+    ranked = sorted(
+        [(slug, o[key]) for slug, o in outcomes.items() if o.get(key) is not None],
+        key=lambda x: x[1], reverse=reverse
+    )
+    return {slug: i+1 for i, (slug, _) in enumerate(ranked)}
 
-
-# --- ADMISSIONS DATA (from ABA 509 reports) — run parse_509_local.py to populate ---
+_rank_biglaw    = _rank_outcomes('biglaw_pct')
+_rank_biglaw_n  = _rank_outcomes('biglaw_n')
+_rank_clerk     = _rank_outcomes('fed_clerk_pct')
+_rank_clerk_n   = _rank_outcomes('fed_clerk_n')
+_rank_state_clerk = _rank_outcomes('state_clerk_n')
+_n_outcomes     = len(outcomes)  # total schools in outcomes for rank display
 admissions_data = {
     "university-of-akron-school-of-law": {
         "apps": 762, "offers": 446, "accept_rate": 58.53,
@@ -3627,6 +3629,136 @@ STATE_TO_PUBLIC_SCHOOLS = {
     "WV": ["west-virginia-university-college-of-law"],
     "WY": ["university-of-wyoming-college-of-law"],
 }
+_surface_cache = {}
+
+def compute_surface(slug):
+    if slug in _surface_cache:
+        return _surface_cache[slug]
+    """Compute the scholarship surface for a school. Returns (xi, yi, Zi) or None."""
+    df_s = _df_by_school.get(slug)
+    if df_s is None: _surface_cache[slug] = None; return None
+    df_s = df_s.dropna(subset=['lsat','gpa','scholarship'])
+    df_s = df_s[df_s['scholarship'] > 0]
+    if len(df_s) < 10: _surface_cache[slug] = None; return None
+
+    n = 60
+    lsat_a  = df_s['lsat'].values.astype(float)
+    gpa_a   = df_s['gpa'].values.astype(float)
+    schol_a = df_s['scholarship'].values.astype(float)
+    max_schol = schol_a.max()
+
+    xi = np.linspace(120.0, 180.0, n)
+    yi = np.linspace(2.0,   4.0,   n)
+    coverage = ((6/60)**2 + (0.3/2)**2)**0.5
+
+    # Pass 1: IDW within coverage (fully vectorized via broadcasting)
+    # shapes: xi(n,), yi(n,), lsat_a(r,) → d2 is (n_gpa, n_lsat, n_reporters)
+    lsat_grid = xi[np.newaxis, :, np.newaxis]         # (1, n, 1)
+    gpa_grid  = yi[:, np.newaxis, np.newaxis]          # (n, 1, 1)
+    d2_all = ((lsat_a - lsat_grid) / 60)**2 + ((gpa_a - gpa_grid) / 2)**2
+    d_all  = np.sqrt(d2_all)
+    in_range = d_all <= coverage                       # (n, n, r)
+    has_data = in_range.any(axis=2)                   # (n, n)
+    w_all    = np.where(in_range, 1.0 / (d2_all + 1e-8), 0.0)
+    w_sum    = w_all.sum(axis=2)
+    Zi       = np.where(has_data,
+                        (w_all * schol_a).sum(axis=2) / np.maximum(w_sum, 1e-10),
+                        0.0)
+    del d2_all, d_all, in_range, w_all, w_sum  # free memory
+
+    # Pass 2: Combined score tiering (vectorized)
+    lsat_range = max(1.0, lsat_a.max() - lsat_a.min())
+    gpa_range  = max(0.01, gpa_a.max() - gpa_a.min())
+    lsat_n = (lsat_a - lsat_a.min()) / lsat_range
+    gpa_n  = (gpa_a  - gpa_a.min())  / gpa_range
+    combined = (lsat_n ** 0.6) * (gpa_n ** 0.4)
+    n_tiers = 10
+    tier_pcts = np.linspace(0, 100, n_tiers + 1)
+    tier_edges = np.percentile(np.sort(schol_a), tier_pcts)
+    tier_centers = np.array([(tier_edges[i] + tier_edges[i+1]) / 2 for i in range(n_tiers)])
+    tier_centers[-1] = max_schol
+    # Precompute tier score thresholds
+    score_thresholds = np.array([np.percentile(combined, p) for p in tier_pcts])
+
+    # Vectorize: compute score for every grid cell at once
+    LN = np.clip((np.array(xi)[:, None] - lsat_a.min()) / lsat_range, 0, 1)  # (n,)
+    GN = np.clip((np.array(yi)[:, None] - gpa_a.min())  / gpa_range,  0, 1)  # (n,)
+    # score grid: (n_gpa, n_lsat)
+    score_grid = np.outer(GN[:, 0] ** 0.4, LN[:, 0] ** 0.6)
+
+    # Assign tier index for each cell using digitize
+    tier_idx_grid = np.digitize(score_grid, score_thresholds[1:])  # 0..n_tiers-1
+    tier_idx_grid = np.clip(tier_idx_grid, 0, n_tiers - 1)
+    tiered_grid = tier_centers[tier_idx_grid]
+
+    # Blend only where data exists
+    Zi = np.where(Zi > 0, tiered_grid * 0.55 + Zi * 0.45, 0)
+
+    # Pass 3: Max corner
+    Zi[-1, -1] = max_schol
+    for dy in range(min(10, n)):
+        for dx in range(min(10, n)):
+            iy_b, ix_b = n-1-dy, n-1-dx
+            if has_data[iy_b, ix_b]:
+                t = max(0.0, 1.0 - (dy + dx) / 14.0)
+                Zi[iy_b, ix_b] = max(Zi[iy_b, ix_b], max_schol * t)
+
+    # Pass 4: Monotonicity (vectorized sweeps)
+    for _ in range(3):
+        # Diagonal: each cell >= southwest neighbor
+        Zi[1:, 1:] = np.maximum(Zi[1:, 1:], Zi[:-1, :-1])
+        # GPA axis: each cell >= cell below
+        for iy in range(1, n):
+            Zi[iy, :] = np.maximum(Zi[iy, :], Zi[iy-1, :])
+        # LSAT axis: each cell >= cell to left
+        for ix in range(1, n):
+            Zi[:, ix] = np.maximum(Zi[:, ix], Zi[:, ix-1])
+
+    # Pass 5: Hard cliff reset
+    for iy in range(n):
+        for ix in range(n):
+            if not has_data[iy, ix] and Zi[iy, ix] < max_schol * 0.05:
+                Zi[iy, ix] = 0.0
+
+    # Pass 6: Smoothing (pure numpy, no scipy needed)
+    w_k = np.array([[1,2,1],[2,4,2],[1,2,1]], dtype=float); w_k /= w_k.sum()
+    Zi_s = Zi.copy()
+    Zi_s[1:-1, 1:-1] = sum(
+        w_k[dy+1, dx+1] * Zi[1+dy:n-1+dy, 1+dx:n-1+dx]
+        for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+    )
+    Zi = np.where(has_data, Zi_s, Zi)
+
+    # Final monotonicity (vectorized)
+    for iy in range(1, n):
+        Zi[iy, :] = np.maximum(Zi[iy, :], Zi[iy-1, :])
+    for ix in range(1, n):
+        Zi[:, ix] = np.maximum(Zi[:, ix], Zi[:, ix-1])
+
+    _surface_cache[slug] = (xi, yi, Zi)
+    return xi, yi, Zi
+
+
+def lookup_surface(slug, u_lsat, u_gpa):
+    result = compute_surface(slug)
+    if result is None: return None
+    xi, yi, Zi = result
+    n = len(xi)
+    # Bilinear interpolation at exact user coordinates
+    ix_f = (u_lsat - xi[0]) / (xi[-1] - xi[0]) * (n - 1)
+    iy_f = (u_gpa  - yi[0]) / (yi[-1] - yi[0]) * (n - 1)
+    ix_f = max(0.0, min(n-1.0, ix_f))
+    iy_f = max(0.0, min(n-1.0, iy_f))
+    ix0, iy0 = int(ix_f), int(iy_f)
+    ix1, iy1 = min(ix0+1, n-1), min(iy0+1, n-1)
+    tx, ty = ix_f - ix0, iy_f - iy0
+    val = (Zi[iy0, ix0] * (1-tx) * (1-ty) +
+           Zi[iy0, ix1] * tx     * (1-ty) +
+           Zi[iy1, ix0] * (1-tx) * ty     +
+           Zi[iy1, ix1] * tx     * ty)
+    return int(val) if val > 0 else 0
+
+
 def get_prediction(slug, u_lsat, u_gpa, user_state=None):
     """Returns (pred_value, source_label, n_nearby, tier) where tier is one of: gt_full, full, half_to_full, lt_half, None."""
     import math
@@ -3661,7 +3793,33 @@ def get_prediction(slug, u_lsat, u_gpa, user_state=None):
             if use_knn_over_aba:
                 k = max(30, int(len(df_schol) * 0.2))
                 neighbors = df_schol.nsmallest(k, '_dist')
-                pred_med = neighbors['scholarship'].median()
+                # If user is far above 75th LSAT, weight nearest reporters much more
+                # to avoid dilution from lower-scoring applicants in the k pool
+                adm_check2 = admissions_data.get(slug, {})
+                _lsat75_check = adm_check2.get('lsat75')
+                if _lsat75_check and (u_lsat - _lsat75_check) >= 6:
+                    # Use inverse-distance weighting — closer reporters get more weight
+                    near_d = neighbors['_dist'].values + 1e-6
+                    near_s = neighbors['scholarship'].values
+                    weights = 1.0 / (near_d ** 1.5)
+                    pred_med = float(np.average(near_s, weights=weights))
+                else:
+                    pred_med = neighbors['scholarship'].median()
+
+                # Dampen KNN if user is well below 25th percentile —
+                # KNN pulls from higher reporters which inflates prediction
+                adm_c = admissions_data.get(slug, {})
+                _l25 = adm_c.get('lsat25'); _g25 = adm_c.get('gpa25')
+                if _l25 and _g25:
+                    lsat_below = max(0.0, _l25 - u_lsat)  # points below 25th
+                    gpa_below  = max(0.0, _g25 - u_gpa)
+                    if lsat_below > 0 or gpa_below > 0:
+                        lsat_damp = max(0.0, 1.0 - lsat_below / 10.0)
+                        gpa_damp  = max(0.0, 1.0 - gpa_below / 0.5)
+                        damp = min(lsat_damp, gpa_damp)
+                        if damp <= 0:
+                            return 0, "adjusted ABA estimate", 0, 'lt_half'
+                        pred_med = pred_med * damp
                 aba_pct_r = grant_data.get(slug, {}).get('pct_receiving')
                 label = f"lsd.law KNN ({n_nearby} nearby · {aba_pct_r:.0f}% receive aid per ABA)" if aba_pct_r else f"lsd.law KNN ({n_nearby} nearby)"
                 # Determine tier from predicted amount vs tuition
@@ -3753,7 +3911,6 @@ def get_prediction(slug, u_lsat, u_gpa, user_state=None):
                         position = rank_among_recipients / band_top
                     else:
                         position = 0.5
-                    # Scale from 0% (bottom) to 50% tuition (top of lt_half)
                     aba_med = int(full_3yr * position * 0.5)
                     predicted_tier = 'lt_half'
 
@@ -4274,17 +4431,24 @@ visualizer_layout = html.Div([
                 dcc.Checklist(
                     id='overlay-toggles',
                     options=[
-                        {'label': html.Span('Median LSAT',   style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'lsat_med'},
-                        {'label': html.Span('Median GPA',    style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'gpa_med'},
-                        {'label': html.Span('25/75 LSAT',    style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'lsat_pct'},
-                        {'label': html.Span('25/75 GPA',     style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'gpa_pct'},
-                        {'label': html.Span('Tuition+Fees (3yr)',style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'coa'},
-                        {'label': html.Span('50% T+F (3yr)',    style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'half_coa'},
-                        {'label': html.Span('IS T+F (3yr)',     style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'is_coa'},
-                        {'label': html.Span('Your Profile',  style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'you'},
-                        {'label': html.Span('Scholarship Only', style={"color": "#c8a96e", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'hide_no_schol'},
-                        {'label': html.Span('Color by Median', style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'color_median'},
-                        {'label': html.Span('Surface View',   style={"color": "#aaa", "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': 'surface_view'},
+                        # --- ADMISSIONS GROUP ---
+                        {'label': html.Span('Median LSAT',  style={"color": "#7eb8f7", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}), 'value': 'lsat_med'},
+                        {'label': html.Span('Median GPA',   style={"color": "#7eb8f7", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}), 'value': 'gpa_med'},
+                        {'label': html.Span('25th LSAT',    style={"color": "#7eb8f7", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px", "opacity": "0.65"}), 'value': 'lsat_p25'},
+                        {'label': html.Span('75th LSAT',    style={"color": "#7eb8f7", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px", "opacity": "0.65"}), 'value': 'lsat_p75'},
+                        {'label': html.Span('25th GPA',     style={"color": "#7eb8f7", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px", "opacity": "0.65"}), 'value': 'gpa_p25'},
+                        {'label': html.Span('75th GPA',     style={"color": "#7eb8f7", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px", "opacity": "0.65"}), 'value': 'gpa_p75'},
+                        # --- COST GROUP ---
+                        {'label': html.Span('T+F (3yr)',     style={"color": "#c8a96e", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}), 'value': 'coa'},
+                        {'label': html.Span('50% T+F',       style={"color": "#c8a96e", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px", "opacity": "0.65"}), 'value': 'half_coa'},
+                        {'label': html.Span('IS T+F',        style={"color": "#7fff7f", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}), 'value': 'is_coa'},
+                        # --- PROFILE GROUP ---
+                        {'label': html.Span('Your Profile',  style={"color": "#ff69b4", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}), 'value': 'you'},
+                        {'label': html.Span('Pred. Range',   style={"color": "#ff69b4", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px", "opacity": "0.65"}), 'value': 'pred_range'},
+                        # --- VIEW GROUP ---
+                        {'label': html.Span('Schol. Only',   style={"color": "#aaa", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}), 'value': 'hide_no_schol'},
+                        {'label': html.Span('By Median',     style={"color": "#aaa", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}), 'value': 'color_median'},
+                        {'label': html.Span('Surface',       style={"color": "#aaa", "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}), 'value': 'surface_view'},
                     ],
                     value=['coa', 'you', 'hide_no_schol', 'color_median'],
                     inputStyle={"accentColor": "#c8a96e"},
@@ -4448,7 +4612,7 @@ visualizer_layout = html.Div([
                         dcc.Dropdown(
                             id='user-state',
                             options=[{"label": s, "value": s} for s in sorted(STATE_TO_PUBLIC_SCHOOLS.keys())],
-                            placeholder="ST",
+                            value='CA',
                             clearable=True,
                             style={
                                 "width": "80px",
@@ -4554,34 +4718,55 @@ def route(pathname):
         html.Div(build_comparison_layout(), id='cmp-page', style=cmp_style),
     ])
 def build_comparison_layout():
+    inp_style = {"background": "#111", "border": "1px solid #2a2a2a", "borderRadius": "6px",
+                 "color": "#c8a96e", "fontSize": "14px", "fontWeight": "600",
+                 "fontFamily": "'DM Serif Display', serif", "padding": "4px 8px", "outline": "none"}
+    lbl_style = {"fontSize": "9px", "color": "#444", "letterSpacing": "0.1em", "marginBottom": "3px"}
+
     return html.Div([
-        # Profile note — uses visualizer inputs
         html.Div([
-            html.Span("Using profile from Visualizer  ·  ", style={"fontSize": "11px", "color": "#444", "fontStyle": "italic"}),
-            html.Span(id='cmp-profile-display', style={"fontSize": "11px", "color": "#c8a96e"}),
+            # Sort buttons on the left
             html.Div([
-                html.Div("SORT BY", style={"fontSize": "9px", "color": "#555", "letterSpacing": "0.1em", "marginBottom": "4px"}),
+                html.Div("SORT", style=lbl_style),
                 html.Div([
                     html.Button(label, id=f'cmp-sort-{key}', n_clicks=0, style={
                         "background": "#111", "border": "1px solid #2a2a2a", "borderRadius": "6px",
                         "color": "#555", "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif",
-                        "padding": "6px 12px", "cursor": "pointer", "letterSpacing": "0.05em",
+                        "padding": "5px 10px", "cursor": "pointer", "letterSpacing": "0.05em",
                     })
                     for key, label in [('rank','Rank'), ('tf','T+F'), ('net_tf','Net T+F'), ('net_coa','Net COA')]
                 ], style={"display": "flex", "gap": "6px"}),
-            ], style={"marginLeft": "auto"}),
-        ], style={"display": "flex", "alignItems": "center", "gap": "16px",
-                  "padding": "12px 24px", "borderBottom": "1px solid #1a1a1a", "backgroundColor": "#0a0a0a"}),
+            ], style={"marginRight": "auto"}),
+
+            # Profile inputs on the right
+            html.Div([
+                html.Div("LSAT", style=lbl_style),
+                dcc.Input(id='cmp-lsat-input', type='number', min=120, max=180, step=1,
+                    value=175, style={**inp_style, "width": "70px"}),
+            ]),
+            html.Div([
+                html.Div("GPA", style=lbl_style),
+                dcc.Input(id='cmp-gpa-input', type='number', min=2.0, max=4.0, step=0.01,
+                    value=3.91, style={**inp_style, "width": "70px"}),
+            ]),
+            html.Div([
+                html.Div("STATE", style=lbl_style),
+                dcc.Dropdown(id='cmp-state-input',
+                    options=[{'label': s, 'value': s} for s in sorted(STATE_TO_PUBLIC_SCHOOLS.keys())],
+                    value='CA', clearable=True, style={"width": "80px", "fontSize": "12px"},
+                    className='state-dropdown'),
+            ]),
+        ], style={"display": "flex", "alignItems": "flex-end", "gap": "14px",
+                  "padding": "10px 20px", "borderBottom": "1px solid #1a1a1a",
+                  "backgroundColor": "#0a0a0a"}),
 
         dcc.Store(id='cmp-sort-store', data='rank'),
+        dcc.Store(id='cmp-sort-dir', data=1),
         dcc.Store(id='cmp-selected-school', data=None),
-        html.Div(id='cmp-stats', style={"padding": "8px 24px", "fontSize": "11px", "color": "#444",
+        html.Div(id='cmp-stats', style={"padding": "5px 20px", "fontSize": "11px", "color": "#444",
                                          "borderBottom": "1px solid #111", "backgroundColor": "#0a0a0a"}),
-        # Split panel
         html.Div([
-            # Table side
             html.Div(id='cmp-table', style={"overflowX": "auto", "overflowY": "auto", "height": "calc(100vh - 160px)"}),
-            # Detail panel
             html.Div(id='cmp-detail', style={"display": "none"}),
         ], id='cmp-split', style={"display": "flex", "gap": "0"}),
     ])
@@ -4590,16 +4775,26 @@ def build_comparison_layout():
 # --- COMPARISON CALLBACKS ---
 @app.callback(
     Output('cmp-sort-store', 'data'),
+    Output('cmp-sort-dir', 'data'),
     [Input(f'cmp-sort-{k}', 'n_clicks') for k in ['rank','tf','net_tf','net_coa']],
+    State('cmp-sort-store', 'data'),
+    State('cmp-sort-dir', 'data'),
     prevent_initial_call=True,
 )
 def update_cmp_sort(*args):
-    triggered = ctx.triggered_id or 'cmp-sort-rank'
-    return triggered.replace('cmp-sort-', '')
+    # args = [n_clicks x4, current_sort, current_dir]
+    current_sort = args[4]
+    current_dir  = args[5]
+    triggered = (ctx.triggered_id or 'cmp-sort-rank').replace('cmp-sort-', '')
+    # If same button clicked again, invert direction
+    new_dir = -current_dir if triggered == current_sort else 1
+    return triggered, new_dir
 
 
 def _predict(slug, u_lsat, u_gpa, is_instate):
-    df_s = df[df['school_slug'] == slug].dropna(subset=['lsat','gpa','scholarship'])
+    df_s = _df_by_school.get(slug)
+    if df_s is None: return None, None, None
+    df_s = df_s.dropna(subset=['lsat','gpa','scholarship'])
     df_s = df_s[df_s['scholarship'] > 0].copy()
     if 'is_in_state' in df_s.columns:
         f = df_s[df_s['is_in_state'].astype(bool) == is_instate]
@@ -4608,21 +4803,6 @@ def _predict(slug, u_lsat, u_gpa, is_instate):
     df_s['_d'] = (((df_s['lsat']-u_lsat)/60)**2 + ((df_s['gpa']-u_gpa)/2)**2)**0.5
     nb = df_s.nsmallest(max(30, int(len(df_s)*0.2)), '_d')
     return nb['scholarship'].quantile(0.25), nb['scholarship'].median(), nb['scholarship'].quantile(0.75)
-
-
-@app.callback(
-    Output('cmp-profile-display', 'children'),
-    Input('user-lsat', 'value'),
-    Input('user-gpa', 'value'),
-    Input('user-state', 'value'),
-    prevent_initial_call=True,
-)
-def update_cmp_profile(user_lsat, user_gpa, user_state):
-    parts = []
-    if user_lsat: parts.append(f"LSAT {int(user_lsat)}")
-    if user_gpa:  parts.append(f"GPA {user_gpa}")
-    if user_state: parts.append(user_state)
-    return "  ·  ".join(parts) if parts else "No profile entered"
 
 
 @app.callback(
@@ -4643,9 +4823,9 @@ def select_cmp_school(n_clicks):
     Output('cmp-detail', 'children'),
     Output('school-dropdown', 'data', allow_duplicate=True),
     Input('cmp-selected-school', 'data'),
-    Input('user-lsat', 'value'),
-    Input('user-gpa', 'value'),
-    Input('user-state', 'value'),
+    Input('cmp-lsat-input', 'value'),
+    Input('cmp-gpa-input', 'value'),
+    Input('cmp-state-input', 'value'),
     prevent_initial_call=True,
 )
 def update_cmp_detail(selected_slug, user_lsat, user_gpa, user_state):
@@ -4692,23 +4872,29 @@ def close_cmp_detail(n):
 @app.callback(
     Output('cmp-table', 'children'),
     Output('cmp-stats', 'children'),
-    Input('user-lsat', 'value'),
-    Input('user-gpa', 'value'),
-    Input('user-state', 'value'),
+    Input('url', 'pathname'),
+    Input('cmp-lsat-input', 'value'),
+    Input('cmp-gpa-input', 'value'),
+    Input('cmp-state-input', 'value'),
     Input('cmp-sort-store', 'data'),
+    Input('cmp-sort-dir', 'data'),
+    prevent_initial_call=True,
 )
-def update_cmp_table(user_lsat, user_gpa, user_state, sort_by):
+def update_cmp_table(pathname, user_lsat, user_gpa, user_state, sort_by, sort_dir):
+    if pathname != '/comparison':
+        return no_update, no_update
     try:
         u_lsat = float(user_lsat) if user_lsat else None
         u_gpa  = float(user_gpa)  if user_gpa  else None
     except: u_lsat = u_gpa = None
 
+    sort_dir = sort_dir or 1
     state = (user_state or '').upper().strip() or None
     if state and state not in STATE_TO_PUBLIC_SCHOOLS: state = None
 
     JD = 31
     rows = []
-    for slug, name in full_slug_map.items():
+    for slug, name in slug_map.items():
         si = school_info.get(slug, {})
         if not si: continue
         rank = rankings.get(slug, {}).get('rank', 999)
@@ -4747,7 +4933,7 @@ def update_cmp_table(user_lsat, user_gpa, user_state, sort_by):
             '_sort': sort_key.get(sort_by or 'rank', rank or 999),
         })
 
-    rows.sort(key=lambda r: r['_sort'])
+    rows.sort(key=lambda r: r['_sort'], reverse=(sort_dir == -1))
 
     def fmt(v):
         return f"${v:,.0f}" if v and v < 9e8 else "—"
@@ -4801,20 +4987,25 @@ def update_cmp_table(user_lsat, user_gpa, user_state, sort_by):
     prevent_initial_call=True,
 )
 def update_overlay_options(selected_slug):
-    def opt(label, value, color="#aaa"):
-        return {'label': html.Span(label, style={"color": color, "fontSize": "11px", "marginLeft": "4px", "marginRight": "12px"}), 'value': value}
+    def opt(label, value, color="#aaa", opacity=1.0):
+        style = {"color": color, "fontSize": "10px", "marginLeft": "3px", "marginRight": "10px"}
+        if opacity < 1: style["opacity"] = str(opacity)
+        return {'label': html.Span(label, style=style), 'value': value}
 
     base = [
-        opt('Median LSAT',       'lsat_med'),
-        opt('Median GPA',        'gpa_med'),
-        opt('25/75 LSAT',        'lsat_pct'),
-        opt('25/75 GPA',         'gpa_pct'),
-        opt('Tuition+Fees (3yr)','coa'),
-        opt('50% T+F (3yr)',     'half_coa'),
-        opt('Your Profile',      'you'),
-        opt('Scholarship Only',  'hide_no_schol', '#c8a96e'),
-        opt('Color by Median',   'color_median'),
-        opt('Surface View',      'surface_view'),
+        opt('Median LSAT', 'lsat_med',  '#7eb8f7'),
+        opt('Median GPA',  'gpa_med',   '#7eb8f7'),
+        opt('25th LSAT',   'lsat_p25',  '#7eb8f7', 0.65),
+        opt('75th LSAT',   'lsat_p75',  '#7eb8f7', 0.65),
+        opt('25th GPA',    'gpa_p25',   '#7eb8f7', 0.65),
+        opt('75th GPA',    'gpa_p75',   '#7eb8f7', 0.65),
+        opt('T+F (3yr)',   'coa',       '#c8a96e'),
+        opt('50% T+F',     'half_coa',  '#c8a96e', 0.65),
+        opt('Your Profile','you',       '#ff69b4'),
+        opt('Pred. Range', 'pred_range','#ff69b4', 0.65),
+        opt('Schol. Only', 'hide_no_schol', '#aaa'),
+        opt('By Median',   'color_median',  '#aaa'),
+        opt('Surface',     'surface_view',  '#aaa'),
     ]
 
     if selected_slug:
@@ -4823,7 +5014,7 @@ def update_overlay_options(selected_slug):
         cr_oos = si.get('credit_oos'); cr_is = si.get('credit_res')
         has_diff = (t_oos and t_is and t_oos != t_is) or (cr_oos and cr_is and cr_oos != cr_is)
         if has_diff:
-            base.insert(6, opt('IS T+F (3yr)', 'is_coa'))
+            base.insert(8, opt('IS T+F', 'is_coa', '#7fff7f'))
 
     return base
 
@@ -4859,7 +5050,7 @@ def toggle_star(n_clicks_list, starred):
 )
 def select_school(n_clicks_list):
     if not ctx.triggered_id:
-        return all_ranked_schools[0] if all_ranked_schools else None
+        return no_update
     return ctx.triggered_id['index']
 
 # Re-render school list
@@ -5343,7 +5534,7 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         else:
             cost_items = [cost_section("COST  (2025–26)", t_oos or t_is, f_oos or f_is, "#555", credit_res, credit_oos)]
 
-        sections.append(box("COST  (2025–26)", cost_items))
+        _cost_box = box("COST  (2025–26)", cost_items)
     # --- GRANT AID BOX ---
     g = grant_data.get(selected_slug)
     if g:
@@ -5354,7 +5545,10 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         # Get predicted tier for highlighting
         pred_tier_for_grant = None
         if u_lsat and u_gpa:
-            _, _, _, pred_tier_for_grant = get_prediction(selected_slug, u_lsat, u_gpa, user_state)
+            _pred_val, _, _, pred_tier_for_grant = get_prediction(selected_slug, u_lsat, u_gpa, user_state)
+            # Don't highlight a tier if the prediction is zero (stats too low)
+            if not _pred_val:
+                pred_tier_for_grant = None
 
         bars = [
             ("Stipend",      "gt_full",      g["gt_full_n"],      g["gt_full_pct"],      "#c82060"),
@@ -5402,7 +5596,7 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         if any(g[k] for k in ["p25", "p50", "p75"]):
             grant_items.append(html.Div([
                 html.Span("GRANT PERCENTILES", style={"fontSize": "9px", "color": "#444", "letterSpacing": "0.08em"}),
-                html.Span("  1yr / 3yr", style={"fontSize": "9px", "color": "#333", "letterSpacing": "0.04em"}),
+                html.Span("  school-wide · 1yr / 3yr", style={"fontSize": "9px", "color": "#333", "letterSpacing": "0.04em"}),
             ], style={"marginTop": "10px", "marginBottom": "4px"}))
             for label, key in [("75th", "p75"), ("50th", "p50"), ("25th", "p25")]:
                 val = g[key]
@@ -5415,6 +5609,8 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                 ], className="percentile-row", style={"justifyContent": "flex-start"}))
 
         sections.append(box("GRANT AID  (ABA 509)", grant_items))
+    if '_cost_box' in locals():
+        sections.append(_cost_box)
 
     # --- SCHOLARSHIP PREDICTION BOX ---
     try:
@@ -5448,6 +5644,7 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         pct_got = None
         p25_from_knn = p75_from_knn = False
 
+        NO_MERIT_SLUGS = {'harvard-law-school', 'stanford-law-school', 'yale-law-school'}
         if u_lsat and u_gpa:
             pred_med, source_label, n_nearby, pred_tier = get_prediction(selected_slug, u_lsat, u_gpa, user_state)
             if pred_med:
@@ -5478,7 +5675,10 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         use_knn = pred_med is not None and source_label and 'lsd.law' in source_label
         _aba_p50 = (g.get("p50") or 0) * 3 or None
         show_p25 = pred_p25 if pred_med else aba_p25
-        show_med = pred_med if pred_med else _aba_p50
+        if selected_slug in NO_MERIT_SLUGS:
+            show_med = pred_med
+        else:
+            show_med = pred_med if pred_med is not None else _aba_p50
         show_p75 = pred_p75 if pred_med else aba_p75
 
         # Scale p25/p75 proportionally whenever the median was adjusted
@@ -5499,26 +5699,45 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
             if show_p75 and show_p75 < show_med: show_p75 = int(show_med * 1.1)
 
         # Only show box if we have some prediction value
+        fmt_k = lambda v: f"${v:,.0f}" if v is not None else "—"
+        pred_items = []
         if show_med is not None:
-            def fmt_k(v):
-                return f"${v:,.0f}" if v else "—"
 
             net_med_tf  = (_tf_3yr  - show_med) if (_tf_3yr  and show_med) else None
             net_p25_tf  = (_tf_3yr  - show_p75) if (_tf_3yr  and show_p75) else None
             net_med_coa = (_coa_3yr - show_med) if (_coa_3yr and show_med) else None
+
+            # Compute surface prediction now so it's available for the p25/median/p75 row
+            surf_pred = None
+            if u_lsat is not None and u_gpa is not None and selected_slug not in NO_MERIT_SLUGS:
+                try:
+                    surf_pred = lookup_surface(selected_slug, u_lsat, u_gpa)
+                except Exception:
+                    surf_pred = None
+
+            # Surface computed above, used in pred_items below
 
             pred_items = [
                 html.Div(
                     source_label if use_knn else f"ABA 509 grant data ({aba_pct:.0f}% of students receive aid)" if aba_pct else "ABA 509 grant data",
                     style={"fontSize": "10px", "color": "#444", "marginBottom": "8px", "fontStyle": "italic"}
                 ),
+                # Surface prediction centered above median
+                html.Div([
+                    html.Div("Surface Prediction", style={"fontSize": "9px", "color": "#7eb8f7", "textAlign": "center"}),
+                    html.Div(
+                        fmt_k(surf_pred) if surf_pred is not None else "",
+                        style={"fontSize": "13px", "color": "#7eb8f7", "textAlign": "center", "fontWeight": "600"}
+                    ),
+                ], style={"display": "flex", "flexDirection": "column", "alignItems": "center",
+                          "marginBottom": "4px"}) if surf_pred is not None else None,
                 html.Div([
                     html.Div([
                         html.Div("25th", style={"fontSize": "9px", "color": "#555", "textAlign": "center"}),
                         html.Div(fmt_k(show_p25), style={"fontSize": "15px", "color": "#ccc", "textAlign": "center", "fontWeight": "500"}),
                     ], style={"flex": "1"}),
                     html.Div([
-                        html.Div("Median", style={"fontSize": "9px", "color": "#555", "textAlign": "center"}),
+                        html.Div("KNN Median", style={"fontSize": "9px", "color": "#555", "textAlign": "center"}),
                         html.Div(fmt_k(show_med), style={"fontSize": "20px", "color": "#c8a96e", "textAlign": "center", "fontWeight": "700"}),
                     ], style={"flex": "1"}),
                     html.Div([
@@ -5613,14 +5832,23 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                 # Remove any None items
                 pred_items = [x for x in pred_items if x is not None]
 
-            sections.append(box("SCHOLARSHIP PREDICTION", pred_items))
+            if surf_pred is not None or pred_items:
+                sections.insert(1, box("SCHOLARSHIP PREDICTION", pred_items))
     o = outcomes.get(selected_slug)
     if o:
-        def out_row(label, val, color="#ccc"):
+        def out_row(label, val, color="#ccc", rank=None):
+            rank_span = None
+            if rank is not None:
+                rank_color = "#c8a96e" if rank <= 5 else "#27a87c" if rank <= 15 else "#555"
+                rank_span = html.Span(f"#{rank}", style={
+                    "color": rank_color, "fontSize": "10px",
+                    "marginLeft": "8px", "opacity": "0.8",
+                })
             return html.Div([
                 html.Span(label, style={"color": "#666", "fontSize": "15px", "minWidth": "110px", "display": "inline-block"}),
                 html.Span(str(val), style={"color": color, "fontSize": "15px", "fontWeight": "500"}),
-            ], style={"marginBottom": "6px"})
+                rank_span,
+            ], style={"marginBottom": "6px", "display": "flex", "alignItems": "center"})
 
         biglaw_color = "#c8a96e" if o["biglaw_pct"] >= 0.50 else "#ccc"
         clerk_color  = "#27a87c" if o["fed_clerk_pct"] >= 0.10 else "#ccc"
@@ -5633,12 +5861,15 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         outcomes_items = [
             out_row("Graduates",       o["grads"]),
             html.Div(style={"borderTop": "1px solid #1e1e1e", "margin": "6px 0"}),
-            out_row("BigLaw (501+)",   f"{o['biglaw_n']}{pct(o['biglaw_n'])}", biglaw_color),
+            out_row("BigLaw (501+)",   f"{o['biglaw_n']}{pct(o['biglaw_n'])}", biglaw_color,
+                    rank=_rank_biglaw.get(selected_slug)),
             out_row("Mid (251–500)",   f"{o['mid_n']}{pct(o['mid_n'])}"),
             out_row("Small (101–250)", f"{o['small_n']}{pct(o['small_n'])}"),
             html.Div(style={"borderTop": "1px solid #1e1e1e", "margin": "6px 0"}),
-            out_row("Fed clerkship",   f"{o['fed_clerk_n']}{pct(o['fed_clerk_n'])}", clerk_color),
-            out_row("State clerkship", f"{o['state_clerk_n']}{pct(o['state_clerk_n'])}"),
+            out_row("Fed clerkship",   f"{o['fed_clerk_n']}{pct(o['fed_clerk_n'])}", clerk_color,
+                    rank=_rank_clerk.get(selected_slug)),
+            out_row("State clerkship", f"{o['state_clerk_n']}{pct(o['state_clerk_n'])}",
+                    rank=_rank_state_clerk.get(selected_slug)),
         ]
         sections.append(box("EMPLOYMENT  ·  ABA 2024", outcomes_items))
 
@@ -5707,67 +5938,18 @@ def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_stat
 
     # --- SURFACE VIEW ---
     if 'surface_view' in overlays:
-        import numpy as np
-        df_surf = df_school.dropna(subset=['lsat', 'gpa', 'scholarship'])
-        df_surf = df_surf[df_surf['scholarship'] > 0]
-        if len(df_surf) >= 10:
-            n = 35
-            xi = np.linspace(df_surf['lsat'].min(), df_surf['lsat'].max(), n)
-            yi = np.linspace(df_surf['gpa'].min(),  df_surf['gpa'].max(),  n)
-            Zi = np.full((n, n), np.nan)
-            counts = np.zeros((n, n))
-
-            # Bin each data point into the nearest grid cell
-            for _, row in df_surf.iterrows():
-                ix = int(np.round((row['lsat'] - xi[0]) / (xi[-1] - xi[0]) * (n-1))) if xi[-1] > xi[0] else 0
-                iy = int(np.round((row['gpa']  - yi[0]) / (yi[-1] - yi[0]) * (n-1))) if yi[-1] > yi[0] else 0
-                ix, iy = max(0, min(n-1, ix)), max(0, min(n-1, iy))
-                if np.isnan(Zi[iy, ix]):
-                    Zi[iy, ix] = row['scholarship']
-                    counts[iy, ix] = 1
-                else:
-                    Zi[iy, ix] = (Zi[iy, ix] * counts[iy, ix] + row['scholarship']) / (counts[iy, ix] + 1)
-                    counts[iy, ix] += 1
-
-            # For empty cells, use weighted average of nearby cells
-            # Cells far from any data (sparse high-end regions) get the local max
-            # to avoid artificial dips
-            global_max = np.nanmax(Zi)
-            for iy in range(n):
-                for ix in range(n):
-                    if np.isnan(Zi[iy, ix]):
-                        neighbors = []
-                        weights = []
-                        for radius in range(1, 6):
-                            for dy in range(-radius, radius+1):
-                                for dx in range(-radius, radius+1):
-                                    if abs(dy) != radius and abs(dx) != radius:
-                                        continue
-                                    ny, nx = iy+dy, ix+dx
-                                    if 0 <= ny < n and 0 <= nx < n and not np.isnan(Zi[ny, nx]):
-                                        dist = (dy**2 + dx**2) ** 0.5
-                                        neighbors.append(Zi[ny, nx])
-                                        weights.append(1.0 / dist)
-                            if neighbors:
-                                break
-                        if neighbors:
-                            # Use max-biased interpolation for cells with no nearby data
-                            # This prevents dipping in above-median regions
-                            weighted_avg = np.average(neighbors, weights=weights)
-                            local_max = max(neighbors)
-                            # Blend toward max in high-LSAT/GPA corner
-                            lsat_pct = ix / (n-1)
-                            gpa_pct  = iy / (n-1)
-                            corner_bias = (lsat_pct + gpa_pct) / 2
-                            Zi[iy, ix] = weighted_avg * (1 - corner_bias * 0.4) + local_max * (corner_bias * 0.4)
-                        else:
-                            Zi[iy, ix] = 0
-
+        result = compute_surface(selected_slug)
+        if result is not None:
+            xi, yi, Zi = result
             fig = go.Figure(data=[go.Surface(
                 x=xi, y=yi, z=Zi,
                 colorscale='Viridis',
-                opacity=0.9,
+                opacity=0.92,
                 showscale=True,
+                contours=dict(z=dict(
+                    show=True, usecolormap=True, highlightcolor='white',
+                    project=dict(z=False), size=max(1, float(Zi.max()) / 8),
+                )),
                 colorbar=dict(
                     title="Aid ($)", tickfont=dict(color='#aaa', size=9),
                     title_font=dict(color='#aaa', size=9), len=0.5, thickness=12,
@@ -5775,7 +5957,6 @@ def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_stat
             )])
         else:
             fig = go.Figure()
-
     # --- COLOR MODE (skip in surface view) ---
     m_data = medians.get(selected_slug) or full_medians.get(selected_slug) or {}
     med_lsat = m_data.get('lsat')
@@ -5864,25 +6045,41 @@ def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_stat
                 showscale=False, name='GPA median'
             )
 
-        if 'lsat_pct' in overlays and 'lsat25' in m:
-            for lsat_val, label in [(m['lsat25'], 'LSAT 25th'), (m['lsat75'], 'LSAT 75th')]:
-                fig.add_surface(
-                    x=[[lsat_val, lsat_val], [lsat_val, lsat_val]],
-                    y=[[y_min, y_max], [y_min, y_max]],
-                    z=[[z_min, z_min], [z_max, z_max]],
-                    opacity=0.18, colorscale=[[0,'#3a7fbf'],[1,'#3a7fbf']],
-                    showscale=False, name=label
-                )
+        if 'lsat_p25' in overlays and m.get('lsat25'):
+            fig.add_surface(
+                x=[[m['lsat25'], m['lsat25']], [m['lsat25'], m['lsat25']]],
+                y=[[y_min, y_max], [y_min, y_max]],
+                z=[[z_min, z_min], [z_max, z_max]],
+                opacity=0.15, colorscale=[[0,'#3a7fbf'],[1,'#3a7fbf']],
+                showscale=False, name='LSAT 25th'
+            )
 
-        if 'gpa_pct' in overlays and 'gpa25' in m:
-            for gpa_val, label in [(m['gpa25'], 'GPA 25th'), (m['gpa75'], 'GPA 75th')]:
-                fig.add_surface(
-                    x=[[x_min, x_max], [x_min, x_max]],
-                    y=[[gpa_val, gpa_val], [gpa_val, gpa_val]],
-                    z=[[z_min, z_min], [z_max, z_max]],
-                    opacity=0.18, colorscale=[[0,'#27a87c'],[1,'#27a87c']],
-                    showscale=False, name=label
-                )
+        if 'lsat_p75' in overlays and m.get('lsat75'):
+            fig.add_surface(
+                x=[[m['lsat75'], m['lsat75']], [m['lsat75'], m['lsat75']]],
+                y=[[y_min, y_max], [y_min, y_max]],
+                z=[[z_min, z_min], [z_max, z_max]],
+                opacity=0.15, colorscale=[[0,'#3a7fbf'],[1,'#3a7fbf']],
+                showscale=False, name='LSAT 75th'
+            )
+
+        if 'gpa_p25' in overlays and m.get('gpa25'):
+            fig.add_surface(
+                x=[[x_min, x_max], [x_min, x_max]],
+                y=[[m['gpa25'], m['gpa25']], [m['gpa25'], m['gpa25']]],
+                z=[[z_min, z_min], [z_max, z_max]],
+                opacity=0.15, colorscale=[[0,'#27a87c'],[1,'#27a87c']],
+                showscale=False, name='GPA 25th'
+            )
+
+        if 'gpa_p75' in overlays and m.get('gpa75'):
+            fig.add_surface(
+                x=[[x_min, x_max], [x_min, x_max]],
+                y=[[m['gpa75'], m['gpa75']], [m['gpa75'], m['gpa75']]],
+                z=[[z_min, z_min], [z_max, z_max]],
+                opacity=0.15, colorscale=[[0,'#27a87c'],[1,'#27a87c']],
+                showscale=False, name='GPA 75th'
+            )
 
     # --- COA PLANE ---
     if 'coa' in overlays and selected_slug in school_info:
@@ -5924,7 +6121,7 @@ def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_stat
                 showscale=False, name='IS T+F (3yr)'
             )
 
-    # --- PREDICTED SCHOLARSHIP DOT ---
+    # --- PREDICTED SCHOLARSHIP DOT + RANGE ---
     if user_lsat is not None and user_gpa is not None:
         dot_pred, dot_label, _, _dot_tier = get_prediction(selected_slug, user_lsat, user_gpa, user_state)
         if dot_pred is not None:
@@ -5945,10 +6142,51 @@ def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_stat
                 y=[user_gpa],
                 z=[clamped_pred],
                 mode='markers',
-                marker=dict(size=10, color=dot_color, symbol='diamond', opacity=1.0,
-                            line=dict(color='white', width=1)),
+                marker=dict(size=12, color=dot_color, symbol='diamond', opacity=1.0,
+                            line=dict(color='white', width=3)),
                 name=f'~${dot_pred:,.0f} predicted'
             )
+
+            # --- PREDICTED RANGE BAR ---
+            if 'pred_range' in overlays:
+                # Get p25/p75 the same way the panel does
+                _g = grant_data.get(selected_slug, {})
+                _aba_p25 = (_g.get("p25") or 0) * 3 or None
+                _aba_p75 = (_g.get("p75") or 0) * 3 or None
+                _pred_p25 = _pred_p75 = None
+                _df_sr = df[df['school_slug'] == selected_slug].dropna(subset=['lsat','gpa'])
+                _dsc = _df_sr[_df_sr['scholarship'] > 0].copy()
+                if len(_dsc) >= 5:
+                    _dsc['_dist'] = (((_dsc['lsat']-float(user_lsat))/60)**2 + ((_dsc['gpa']-float(user_gpa))/2)**2)**0.5
+                    _n = int((_dsc['_dist'] <= ((7/60)**2+(0.35/2)**2)**0.5).sum())
+                    if _n >= 5:
+                        _k = max(30, int(len(_dsc)*0.2))
+                        _nb = _dsc.nsmallest(_k, '_dist')
+                        _pred_p25 = _nb['scholarship'].quantile(0.25)
+                        _pred_p75 = _nb['scholarship'].quantile(0.75)
+                _aba_p50 = (_g.get("p50") or 0) * 3 or None
+                show_p25 = _pred_p25 if _pred_p25 else _aba_p25
+                show_p75 = _pred_p75 if _pred_p75 else _aba_p75
+                if _aba_p50 and _aba_p50 != dot_pred:
+                    scale = dot_pred / _aba_p50
+                    if not _pred_p25 and _aba_p25: show_p25 = int(_aba_p25 * scale)
+                    if not _pred_p75 and _aba_p75: show_p75 = int(_aba_p75 * scale)
+                if show_p25 and show_p75:
+                    p25_c = max(z_min, min(show_p25, z_max))
+                    p75_c = max(z_min, min(show_p75, z_max))
+                    # Vertical line from p25 to p75 at the user's position
+                    n_pts = 30
+                    z_range = [p25_c + (p75_c - p25_c) * i / (n_pts-1) for i in range(n_pts)]
+                    fig.add_scatter3d(
+                        x=[float(user_lsat)] * n_pts,
+                        y=[float(user_gpa)]  * n_pts,
+                        z=z_range,
+                        mode='lines',
+                        line=dict(color='#ff69b4', width=8),
+                        opacity=0.5,
+                        name=f'Range ${show_p25:,.0f}–${show_p75:,.0f}',
+                        showlegend=True,
+                    )
 
     fig.update_layout(
         paper_bgcolor="#000000",
