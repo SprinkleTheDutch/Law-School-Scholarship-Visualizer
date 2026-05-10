@@ -158,7 +158,7 @@ medians = {
 # --- SCHOOL INFO (location + 509 tuition/fees/living, all annual figures) ---
 # tuition/fees/living are annual; coa_3yr = (tuition+fees+living)*3
 school_info = {
-    "university-of-akron-school-of-law": {"city": "", "tuition": 22359, "fees": 4390, "tuition_res": 22359, "fees_res": 4290, "living": 5500},
+    "university-of-akron-school-of-law": {"city": "", "tuition": 22359, "fees": 4390, "tuition_res": 22359, "fees_res": 4290, "living": 11550},
     "university-of-alabama-school-of-law": {"city": "AL", "tuition": 48100, "fees": 899, "tuition_res": 24980, "fees_res": 899, "living": 22620},
     "albany-law-school": {"city": "", "tuition": 63994, "fees": 240, "tuition_res": 63994, "fees_res": 240, "living": 21844},
     "american-university-law-school": {"city": "", "tuition": 66990, "fees": 2182, "tuition_res": 66990, "fees_res": 2182, "living": 33832},
@@ -257,7 +257,7 @@ school_info = {
     "university-of-miami-law": {"city": "FL", "tuition": 66720, "fees": 2498, "tuition_res": 66720, "fees_res": 2498, "living": 43924},
     "michigan-state-university-college-of-law": {"city": "MI", "tuition": 48222, "fees": 388, "tuition_res": 43480, "fees_res": 388, "living": 27152},
     "michigan-law-school": {"city": "MI", "tuition": 79108, "fees": 572, "tuition_res": 76108, "fees_res": 572, "living": 26886},
-    "university-of-minnesota-law-school": {"city": "MN", "tuition": 64524, "fees": 0, "tuition_res": 54120, "fees_res": 0, "living": 19108},
+    "university-of-minnesota-law-school": {"city": "MN", "tuition": 64524, "fees": 0, "tuition_res": 54120, "fees_res": 0, "living": 19600},
     "mississippi-college-school-of-law": {"city": "MS", "tuition": 37980, "fees": 1662, "tuition_res": 37980, "fees_res": 1662, "living": 26100},
     "university-of-missouri-school-of-law": {"city": "MO", "tuition": None, "fees": None, "tuition_res": None, "fees_res": None, "living": 22002, "credit_res": 812, "credit_oos": 1028},
     "umkc-law-school": {"city": "MO", "tuition": None, "fees": None, "tuition_res": None, "fees_res": None, "living": 23924, "credit_res": 786, "credit_oos": 986},
@@ -335,6 +335,7 @@ school_info = {
     "villanova-university-charles-widger-school-of-law": {"city": "", "tuition": 59800, "fees": 950, "tuition_res": 59800, "fees_res": 950, "living": 25492},
     "uva-law-school": {"city": "VA", "tuition": 76396, "fees": 4504, "tuition_res": 74078, "fees_res": 3822, "living": 28770},
     "wake-forest-law-school": {"city": "NC", "tuition": 57920, "fees": 1224, "tuition_res": 57920, "fees_res": 1224, "living": 30639},
+    "university-of-oklahoma-college-of-law": {"city": "OK", "tuition": 33357, "fees": 0, "tuition_res": 18739, "fees_res": 0, "living": 27748},
     "washburn-university-school-of-law": {"city": "", "tuition": None, "fees": None, "tuition_res": None, "fees_res": None, "living": 17018, "credit_res": 932, "credit_oos": 1393},
     "washington-and-lee-law-school": {"city": "", "tuition": 57450, "fees": 2490, "tuition_res": 57450, "fees_res": 2490, "living": 21890},
     "washington-university-school-of-law": {"city": "MO", "tuition": 72792, "fees": 892, "tuition_res": 72792, "fees_res": 892, "living": 28603},
@@ -3631,6 +3632,14 @@ STATE_TO_PUBLIC_SCHOOLS = {
 }
 _surface_cache = {}
 
+def info_btn(text):
+    """Small ℹ button with CSS-only hover tooltip."""
+    return html.Span([
+        "ℹ",
+        html.Span(text, className="tooltip"),
+    ], className="info-btn")
+
+
 def compute_surface(slug):
     if slug in _surface_cache:
         return _surface_cache[slug]
@@ -3757,6 +3766,7 @@ def lookup_surface(slug, u_lsat, u_gpa):
            Zi[iy1, ix0] * (1-tx) * ty     +
            Zi[iy1, ix1] * tx     * ty)
     return int(val) if val > 0 else 0
+
 
 
 def get_prediction(slug, u_lsat, u_gpa, user_state=None):
@@ -4119,6 +4129,53 @@ app.index_string = '''
                 color: #c8a96e !important;
                 background: transparent !important;
             }
+            /* Info button tooltips */
+            .info-btn {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 13px;
+                height: 13px;
+                border-radius: 50%;
+                background: #1e1e1e;
+                border: 1px solid #333;
+                color: #555;
+                font-size: 9px;
+                cursor: default;
+                position: relative;
+                vertical-align: middle;
+                margin-left: 4px;
+                flex-shrink: 0;
+                user-select: none;
+            }
+            .info-btn:hover { border-color: #555; color: #888; }
+            .info-btn .tooltip {
+                visibility: hidden;
+                opacity: 0;
+                background: #1a1a1a;
+                border: 1px solid #2a2a2a;
+                color: #bbb;
+                font-size: 11px;
+                font-weight: 400;
+                line-height: 1.5;
+                border-radius: 6px;
+                padding: 8px 10px;
+                position: absolute;
+                z-index: 9999;
+                bottom: 140%;
+                left: 50%;
+                transform: translateX(-50%);
+                width: 220px;
+                pointer-events: none;
+                transition: opacity 0.15s;
+                box-shadow: 0 4px 16px #000a;
+                letter-spacing: 0;
+                font-family: 'DM Sans', sans-serif;
+            }
+            .info-btn:hover .tooltip {
+                visibility: visible;
+                opacity: 1;
+            }
         </style>
     </head>
     <body>
@@ -4263,6 +4320,11 @@ CITY_MAP = {
     "university-of-richmond-school-of-law": "Richmond, VA",
     "washington-and-lee-law-school": "Lexington, VA",
     "appalachian-school-of-law": "Grundy, VA",
+    "ave-maria-school-of-law": "Naples, FL",
+    "capital-university-law": "Columbus, OH",
+    "university-of-dayton-school-of-law": "Dayton, OH",
+    "southern-university-law": "Baton Rouge, LA",
+    "wilmington-university-law": "Wilmington, DE",
     "liberty-university-law": "Lynchburg, VA",
     "unc-law-school": "Chapel Hill, NC",
     "north-carolina-central-law": "Durham, NC",
@@ -4639,7 +4701,7 @@ visualizer_layout = html.Div([
             html.Div(
                 id='median-panel',
                 children="Select a school",
-                style={"color": "white", "fontSize": "16px", "lineHeight": "1.6"}
+                style={"color": "white", "fontSize": "16px", "lineHeight": "1.6", "flex": "1"}
             )
         ], style={
             "flex": "1",
@@ -4663,6 +4725,7 @@ visualizer_layout = html.Div([
 
 
 # --- ROUTING CALLBACK ---
+
 @app.callback(
     Output('page-header', 'children'),
     Input('url', 'pathname'),
@@ -4736,6 +4799,23 @@ def build_comparison_layout():
                     })
                     for key, label in [('rank','Rank'), ('tf','T+F'), ('net_tf','Net T+F'), ('net_coa','Net COA')]
                 ], style={"display": "flex", "gap": "6px"}),
+            ], style={"marginRight": "16px"}),
+
+            # Prediction mode toggle (table only)
+            html.Div([
+                html.Div("PRED. AID", style=lbl_style),
+                html.Div([
+                    html.Button("KNN", id='cmp-pred-knn', n_clicks=0, style={
+                        "background": "#1a1a12", "border": "1px solid #c8a96e44",
+                        "color": "#c8a96e", "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif",
+                        "padding": "5px 10px", "cursor": "pointer", "borderRadius": "4px 0 0 4px",
+                    }),
+                    html.Button("Surface", id='cmp-pred-surface', n_clicks=0, style={
+                        "background": "#111", "border": "1px solid #2a2a2a",
+                        "color": "#555", "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif",
+                        "padding": "5px 10px", "cursor": "pointer", "borderRadius": "0 4px 4px 0",
+                    }),
+                ], style={"display": "flex"}),
             ], style={"marginRight": "auto"}),
 
             # Profile inputs on the right
@@ -4762,17 +4842,40 @@ def build_comparison_layout():
 
         dcc.Store(id='cmp-sort-store', data='rank'),
         dcc.Store(id='cmp-sort-dir', data=1),
+        dcc.Store(id='cmp-pred-mode', data='knn'),
         dcc.Store(id='cmp-selected-school', data=None),
         html.Div(id='cmp-stats', style={"padding": "5px 20px", "fontSize": "11px", "color": "#444",
                                          "borderBottom": "1px solid #111", "backgroundColor": "#0a0a0a"}),
         html.Div([
-            html.Div(id='cmp-table', style={"overflowX": "auto", "overflowY": "auto", "height": "calc(100vh - 160px)"}),
+            dcc.Loading(
+                type='circle', color='#c8a96e',
+                children=html.Div(id='cmp-table'),
+            ),
             html.Div(id='cmp-detail', style={"display": "none"}),
         ], id='cmp-split', style={"display": "flex", "gap": "0"}),
     ])
 
 
 # --- COMPARISON CALLBACKS ---
+@app.callback(
+    Output('cmp-pred-mode', 'data'),
+    Output('cmp-pred-knn', 'style'),
+    Output('cmp-pred-surface', 'style'),
+    Input('cmp-pred-knn', 'n_clicks'),
+    Input('cmp-pred-surface', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def toggle_cmp_pred_mode(knn_clicks, surf_clicks):
+    mode = 'surface' if ctx.triggered_id == 'cmp-pred-surface' else 'knn'
+    def btn(active, color, radius):
+        return {"background": "#1a1a12" if active else "#111",
+                "border": f"1px solid {color}44" if active else "1px solid #2a2a2a",
+                "color": color if active else "#555",
+                "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif",
+                "padding": "5px 10px", "cursor": "pointer", "borderRadius": radius}
+    return mode, btn(mode=='knn', '#c8a96e', '4px 0 0 4px'), btn(mode=='surface', '#7eb8f7', '0 4px 4px 0')
+
+
 @app.callback(
     Output('cmp-sort-store', 'data'),
     Output('cmp-sort-dir', 'data'),
@@ -4878,23 +4981,34 @@ def close_cmp_detail(n):
     Input('cmp-state-input', 'value'),
     Input('cmp-sort-store', 'data'),
     Input('cmp-sort-dir', 'data'),
-    prevent_initial_call=True,
+    Input('cmp-pred-mode', 'data'),
+    State('user-lsat', 'value'),
+    State('user-gpa', 'value'),
+    State('user-state', 'value'),
 )
-def update_cmp_table(pathname, user_lsat, user_gpa, user_state, sort_by, sort_dir):
+def update_cmp_table(pathname, cmp_lsat, cmp_gpa, cmp_state, sort_by, sort_dir, cmp_pred_mode,
+                     vis_lsat, vis_gpa, vis_state):
+    if pathname != '/comparison':
+        return no_update, no_update
+    # Use cmp inputs if available, fall back to visualizer inputs
+    user_lsat = cmp_lsat if cmp_lsat is not None else vis_lsat
+    user_gpa  = cmp_gpa  if cmp_gpa  is not None else vis_gpa
+    user_state = cmp_state or vis_state
     if pathname != '/comparison':
         return no_update, no_update
     try:
-        u_lsat = float(user_lsat) if user_lsat else None
-        u_gpa  = float(user_gpa)  if user_gpa  else None
-    except: u_lsat = u_gpa = None
+        u_lsat = float(user_lsat) if user_lsat is not None else 175.0
+        u_gpa  = float(user_gpa)  if user_gpa  is not None else 3.91
+    except: u_lsat, u_gpa = 175.0, 3.91
 
+    sort_by  = sort_by  or 'rank'
     sort_dir = sort_dir or 1
     state = (user_state or '').upper().strip() or None
     if state and state not in STATE_TO_PUBLIC_SCHOOLS: state = None
 
     JD = 31
     rows = []
-    for slug, name in slug_map.items():
+    for slug, name in full_slug_map.items():
         si = school_info.get(slug, {})
         if not si: continue
         rank = rankings.get(slug, {}).get('rank', 999)
@@ -4909,25 +5023,38 @@ def update_cmp_table(pathname, user_lsat, user_gpa, user_state, sort_by, sort_di
             t = si.get('tuition') or si.get('tuition_res') or ((si.get('credit_oos') or si.get('credit_res') or 0)*JD)
             f = si.get('fees') or si.get('fees_res') or 0
         living = si.get('living') or 0
-        tf3  = (t+f)*3 if t else None
-        coa3 = (t+f+living)*3 if t else None
+        tf3   = (t+f)*3 if t else None
+        coa3  = living*3 if living else None  # living expenses × 3
 
         g = grant_data.get(slug, {})
         aba_med = g.get('p50')
         p25 = p50 = p75 = None
         if u_lsat and u_gpa:
             p25, p50, p75 = _predict(slug, u_lsat, u_gpa, is_instate)
+        if cmp_pred_mode == 'surface' and u_lsat and u_gpa:
+            surf_val = lookup_surface(slug, u_lsat, u_gpa)
+            if surf_val is not None:
+                p50 = surf_val
+
+
 
         schol = p50 if p50 else aba_med
         net_tf  = (tf3  - schol) if (tf3  and schol) else tf3
-        net_coa = (coa3 - schol) if (coa3 and schol) else coa3
+        net_coa = (net_tf + coa3) if (net_tf is not None and coa3) else net_tf
 
         sort_key = {'rank': rank or 999, 'tf': tf3 or 9e9, 'net_tf': net_tf or 9e9, 'net_coa': net_coa or 9e9}
+
+        # Get state from CITY_MAP ("City, ST") or fall back to school_info city field
+        _city_map_entry = CITY_MAP.get(slug, '')
+        if _city_map_entry and ',' in _city_map_entry:
+            _state_str = _city_map_entry.split(',')[-1].strip()
+        else:
+            _state_str = si.get('city', '') or ''
 
         rows.append({
             'slug': slug,
             'rank': rank, 'rank_str': f"#{rank}" if rank and rank < 999 else "NR",
-            'name': name, 'state': si.get('city',''), 'type': ('IS' if is_instate else 'OOS') if has_is_oos else '—',
+            'name': name, 'state': _state_str, 'type': ('IS' if is_instate else 'OOS') if has_is_oos else '—',
             'tf3': tf3, 'coa3': coa3, 'aba_med': aba_med, 'pred': p50,
             'net_tf': net_tf, 'net_coa': net_coa,
             '_sort': sort_key.get(sort_by or 'rank', rank or 999),
@@ -4954,7 +5081,6 @@ def update_cmp_table(pathname, user_lsat, user_gpa, user_state, sort_by, sort_di
             cell(r['type'], tc),
             cell(fmt(r['tf3'])),
             cell(fmt(r['coa3'])),
-            cell(fmt(r['aba_med']), "#c8a96e"),
             cell(fmt(r['pred']), "#ff69b4"),
             cell(fmt(r['net_tf']), "#f4c430", bold=True),
             cell(fmt(r['net_coa']), "#aaa"),
@@ -4963,21 +5089,43 @@ def update_cmp_table(pathname, user_lsat, user_gpa, user_state, sort_by, sort_di
            n_clicks=0))
 
     th_style = {"padding": "8px 12px", "fontSize": "9px", "letterSpacing": "0.1em",
-                 "color": "#444", "borderBottom": "1px solid #1e1e1e", "fontWeight": "500",
-                 "whiteSpace": "nowrap", "textAlign": "left"}
+                 "color": "#444", "borderBottom": "2px solid #2a2a2a", "fontWeight": "500",
+                 "whiteSpace": "nowrap", "textAlign": "left",
+                 "position": "sticky", "top": "0", "backgroundColor": "#0a0a0a", "zIndex": "10"}
+    COL_TIPS = {
+        'Rank':        "US News 2026 law school ranking.",
+        'IS/OOS':      "Whether the predicted cost uses in-state (IS) or out-of-state (OOS) tuition based on your state.",
+        'T+F (3yr)':   "Tuition + fees × 3 years. IS rate used if you selected your home state.",
+        'Living (3yr)':"ABA-reported off-campus living expenses × 3 years (room, board, transport, personal).",
+        'Pred. Aid':   "Predicted merit scholarship based on your LSAT/GPA. Toggle KNN/Surface above to switch models.",
+        'Net T+F':     "T+F (3yr) minus Predicted Aid. Your estimated tuition cost after scholarship.",
+        'Net COA':     "Net T+F plus Living (3yr). Total estimated cost of attendance after scholarship.",
+    }
+    def th_cell(label):
+        tip = COL_TIPS.get(label)
+        if tip:
+            return html.Th(html.Div([label, info_btn(tip)],
+                           style={"display":"flex","alignItems":"center","gap":"2px"}),
+                           style=th_style)
+        return html.Th(label, style=th_style)
+
     table = html.Table([
-        html.Thead(html.Tr([html.Th(h, style=th_style) for h in [
-            'Rank','School','State','IS/OOS','T+F (3yr)','COA (3yr)','ABA Aid','Pred. Aid','Net T+F','Net COA'
+        html.Thead(html.Tr([th_cell(h) for h in [
+            'Rank','School','State','IS/OOS','T+F (3yr)','Living (3yr)','Pred. Aid','Net T+F','Net COA'
         ]])),
         html.Tbody(tbody),
-    ], style={"width": "100%", "borderCollapse": "collapse", "marginTop": "12px"})
+    ], style={"width": "100%", "borderCollapse": "collapse", "marginTop": "0"})
 
     with_data = sum(1 for r in rows if r['net_tf'])
     stats = f"{len(rows)} schools  ·  {with_data} with cost data"
     if u_lsat and u_gpa: stats += f"  ·  Predictions for LSAT {int(u_lsat)}, GPA {u_gpa}"
     if state: stats += f"  ·  {state} resident rates applied"
 
-    return table, stats
+    return html.Div(table, style={
+        "overflowY": "auto", "overflowX": "auto",
+        "height": "calc(100vh - 160px)",
+        "position": "relative",
+    }), stats
 
 
 
@@ -5287,12 +5435,17 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         _f = si.get("fees") or si.get("fees_res") or 0
         school_coa = (_t + _f + (si.get("living") or 0)) * 3
 
-    def box(header, content_items, border_color="#1e1e1e"):
-        return html.Div([
-            html.Div(header, style={
+    def box(header, content_items, border_color="#1e1e1e", info=None):
+        header_el = html.Div(
+            [header, info] if info else header,
+            style={
                 "fontSize": "11px", "letterSpacing": "0.12em",
-                "color": "#555", "fontWeight": "500", "marginBottom": "10px"
-            }),
+                "color": "#555", "fontWeight": "500", "marginBottom": "10px",
+                "display": "flex", "alignItems": "center",
+            }
+        )
+        return html.Div([
+            header_el,
             *content_items
         ], style={
             "backgroundColor": "#0f0f0f",
@@ -5429,7 +5582,10 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         admissions_items.extend(rank_display)
 
     sections = []
-    sections.append(box("ADMISSIONS  ·  ABA 509", admissions_items))
+    sections.append(box("ADMISSIONS  ·  ABA 509", admissions_items, info=info_btn(
+        "ABA 509 disclosure data: the 25th/median/75th percentile LSAT and GPA of enrolled students. "
+        "Your profile dot shows where you fall relative to the class."
+    )))
 
     # --- COST BOX ---
     if si is not None:
@@ -5534,7 +5690,10 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         else:
             cost_items = [cost_section("COST  (2025–26)", t_oos or t_is, f_oos or f_is, "#555", credit_res, credit_oos)]
 
-        _cost_box = box("COST  (2025–26)", cost_items)
+        _cost_box = box("COST  (2025–26)", cost_items, info=info_btn(
+            "Annual tuition and fees from ABA 509 disclosures. IS = in-state resident rate, OOS = out-of-state. "
+            "3-year totals used in the Scholarship Prediction section."
+        ))
     # --- GRANT AID BOX ---
     g = grant_data.get(selected_slug)
     if g:
@@ -5608,7 +5767,10 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                     html.Span(f"${val3:,.0f}" if val3 else "—", style={"color": "#c8a96e"}),
                 ], className="percentile-row", style={"justifyContent": "flex-start"}))
 
-        sections.append(box("GRANT AID  (ABA 509)", grant_items))
+        sections.append(box("GRANT AID  (ABA 509)", grant_items, info=info_btn(
+            "School-wide grant aid statistics from ABA 509 — not personalized to your profile. "
+            "Shows what the school gives across all recipients. p25/p50/p75 are annual / 3-year amounts."
+        )))
     if '_cost_box' in locals():
         sections.append(_cost_box)
 
@@ -5645,6 +5807,7 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         p25_from_knn = p75_from_knn = False
 
         NO_MERIT_SLUGS = {'harvard-law-school', 'stanford-law-school', 'yale-law-school'}
+        surf_pred = None
         if u_lsat and u_gpa:
             pred_med, source_label, n_nearby, pred_tier = get_prediction(selected_slug, u_lsat, u_gpa, user_state)
             if pred_med:
@@ -5679,6 +5842,9 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
             show_med = pred_med
         else:
             show_med = pred_med if pred_med is not None else _aba_p50
+
+
+
         show_p75 = pred_p75 if pred_med else aba_p75
 
         # Scale p25/p75 proportionally whenever the median was adjusted
@@ -5833,7 +5999,10 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                 pred_items = [x for x in pred_items if x is not None]
 
             if surf_pred is not None or pred_items:
-                sections.insert(1, box("SCHOLARSHIP PREDICTION", pred_items))
+                sections.insert(1, box("SCHOLARSHIP PREDICTION", pred_items, info=info_btn(
+                "Predicted merit aid based on lsd.law reporter data and ABA 509 statistics. "
+                "Surface Prediction uses a 2D interpolation model; KNN Median uses nearest-neighbor reporters with similar stats."
+            )))
     o = outcomes.get(selected_slug)
     if o:
         def out_row(label, val, color="#ccc", rank=None):
@@ -5871,7 +6040,10 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
             out_row("State clerkship", f"{o['state_clerk_n']}{pct(o['state_clerk_n'])}",
                     rank=_rank_state_clerk.get(selected_slug)),
         ]
-        sections.append(box("EMPLOYMENT  ·  ABA 2024", outcomes_items))
+        sections.append(box("EMPLOYMENT  ·  ABA 2024", outcomes_items, info=info_btn(
+            "Class of 2024 employment outcomes from ABA disclosures. "
+            "BigLaw = firms of 500+ attorneys. Clerkships = federal and state judicial clerkships."
+        )))
 
     # Split sections into two columns
     left_cols  = sections[::2]   # indexes 0, 2, 4 ...
