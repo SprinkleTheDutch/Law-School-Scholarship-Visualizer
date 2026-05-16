@@ -4,15 +4,37 @@ from dash import Dash, dcc, html, Input, Output, State, ALL, ctx, no_update
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import sys
+import traceback
+import logging
+
+# Log to file so errors are captured even if the window closes immediately
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dashboard_error.log')
+logging.basicConfig(
+    filename=_LOG_PATH,
+    level=logging.ERROR,
+    format='%(asctime)s %(levelname)s %(message)s'
+)
+
+def _handle_exception(exc_type, exc_value, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    logging.error(f"Uncaught exception:\n{error_msg}")
+    print(f"\n{'='*60}\nERROR — also saved to: {_LOG_PATH}\n{'='*60}\n{error_msg}")
+
+sys.excepthook = _handle_exception
 
 print("🚀 Starting dashboard...")
 
 # --- LOAD DATA ---
 # Supports local development and deployed environments
 _BASE = os.path.dirname(os.path.abspath(__file__))
-_CSV_LOCAL   = r"E:\Law School Application\Scholarship data\ALL_SCHOOLS_COMBINED.csv"
-_EXCEL_LOCAL = r"E:\Law School Application\Scholarship data\ALL_SCHOOLS_COMBINED.xlsx"
 _CSV_DEPLOY  = os.path.join(_BASE, "data", "ALL_SCHOOLS_COMBINED.csv")
+# For local development, place the CSV in a 'data' subfolder next to this script
+# or update _CSV_LOCAL to your local path:
+_CSV_LOCAL   = os.path.join(_BASE, "ALL_SCHOOLS_COMBINED.csv")
 
 if os.path.exists(_CSV_DEPLOY):
     df = pd.read_csv(_CSV_DEPLOY)
@@ -43,8 +65,13 @@ df['scholarship'] = pd.to_numeric(df['scholarship'], errors='coerce')
 
 df = df.dropna(subset=['lsat', 'gpa'])
 
+# Keep only columns actually used — drop everything else to save RAM
+_KEEP_COLS = ['school', 'school_slug', 'lsat', 'gpa', 'scholarship', 'is_in_state']
+_KEEP_COLS = [c for c in _KEEP_COLS if c in df.columns]
+df = df[_KEEP_COLS].copy()
+
 # Pre-group by school slug for fast KNN lookup in comparison table
-_df_by_school = {slug: grp for slug, grp in df.groupby('school_slug')}
+_df_by_school = {slug: grp.reset_index(drop=True) for slug, grp in df.groupby('school_slug')}
 
 # --- DISPLAY NAMES ---
 slug_map = {
@@ -3660,20 +3687,34 @@ def compute_surface(slug):
     yi = np.linspace(2.0,   4.0,   n)
     coverage = ((6/60)**2 + (0.3/2)**2)**0.5
 
-    # Pass 1: IDW within coverage (fully vectorized via broadcasting)
-    # shapes: xi(n,), yi(n,), lsat_a(r,) → d2 is (n_gpa, n_lsat, n_reporters)
-    lsat_grid = xi[np.newaxis, :, np.newaxis]         # (1, n, 1)
-    gpa_grid  = yi[:, np.newaxis, np.newaxis]          # (n, 1, 1)
-    d2_all = ((lsat_a - lsat_grid) / 60)**2 + ((gpa_a - gpa_grid) / 2)**2
-    d_all  = np.sqrt(d2_all)
-    in_range = d_all <= coverage                       # (n, n, r)
-    has_data = in_range.any(axis=2)                   # (n, n)
-    w_all    = np.where(in_range, 1.0 / (d2_all + 1e-8), 0.0)
-    w_sum    = w_all.sum(axis=2)
-    Zi       = np.where(has_data,
-                        (w_all * schol_a).sum(axis=2) / np.maximum(w_sum, 1e-10),
-                        0.0)
-    del d2_all, d_all, in_range, w_all, w_sum  # free memory
+    # Pass 1: IDW within coverage — chunked to avoid large 3D array
+    coverage = ((6/60)**2 + (0.3/2)**2)**0.5
+    Zi       = np.zeros((n, n))
+    has_data = np.zeros((n, n), dtype=bool)
+
+    # Cap reporters to avoid memory explosion on schools with many lsd reports
+    if len(lsat_a) > 300:
+        # Keep the most spread-out reporters via random subsample
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(lsat_a), 300, replace=False)
+        lsat_a, gpa_a, schol_a = lsat_a[idx], gpa_a[idx], schol_a[idx]
+
+    # Process in row chunks to keep memory bounded (~60 * chunk * reporters floats)
+    CHUNK = 10
+    for iy_start in range(0, n, CHUNK):
+        iy_end = min(iy_start + CHUNK, n)
+        gpa_chunk = yi[iy_start:iy_end]          # (chunk,)
+        # d2: (chunk, n, reporters)
+        d2 = (((lsat_a - xi[np.newaxis, :, np.newaxis]) / 60)**2 +
+              ((gpa_a  - gpa_chunk[:, np.newaxis, np.newaxis]) / 2)**2)
+        d  = np.sqrt(d2)
+        mask = d <= coverage                      # (chunk, n, reporters)
+        hd   = mask.any(axis=2)                  # (chunk, n)
+        w    = np.where(mask, 1.0 / (d2 + 1e-8), 0.0)
+        ws   = w.sum(axis=2)
+        Zi[iy_start:iy_end] = np.where(hd, (w * schol_a).sum(axis=2) / np.maximum(ws, 1e-10), 0.0)
+        has_data[iy_start:iy_end] = hd
+        del d2, d, mask, w, ws
 
     # Pass 2: Combined score tiering (vectorized)
     lsat_range = max(1.0, lsat_a.max() - lsat_a.min())
@@ -3802,18 +3843,23 @@ def get_prediction(slug, u_lsat, u_gpa, user_state=None):
 
             if use_knn_over_aba:
                 k = max(30, int(len(df_schol) * 0.2))
-                neighbors = df_schol.nsmallest(k, '_dist')
-                # If user is far above 75th LSAT, weight nearest reporters much more
-                # to avoid dilution from lower-scoring applicants in the k pool
                 adm_check2 = admissions_data.get(slug, {})
                 _lsat75_check = adm_check2.get('lsat75')
-                if _lsat75_check and (u_lsat - _lsat75_check) >= 6:
-                    # Use inverse-distance weighting — closer reporters get more weight
+                _gpa75_check  = adm_check2.get('gpa75')
+                lsat_above_75 = _lsat75_check and (u_lsat - _lsat75_check) >= 6
+                gpa_above_75  = _gpa75_check  and (u_gpa  - _gpa75_check)  >= -0.05
+
+                if lsat_above_75:
+                    # Far above 75th LSAT — use tighter pool to avoid dilution
+                    # and IDW to weight closest reporters most
+                    k = max(15, int(len(df_schol) * 0.1))
+                    neighbors = df_schol.nsmallest(k, '_dist')
                     near_d = neighbors['_dist'].values + 1e-6
                     near_s = neighbors['scholarship'].values
-                    weights = 1.0 / (near_d ** 1.5)
+                    weights = 1.0 / (near_d ** 2.0)
                     pred_med = float(np.average(near_s, weights=weights))
                 else:
+                    neighbors = df_schol.nsmallest(k, '_dist')
                     pred_med = neighbors['scholarship'].median()
 
                 # Dampen KNN if user is well below 25th percentile —
@@ -3883,6 +3929,13 @@ def get_prediction(slug, u_lsat, u_gpa, user_state=None):
             else:
                 pct_receiving = 0.75  # reasonable default
         if pct_receiving > 0:
+            # Find threshold z separating aid/no-aid recipients
+            lo, hi = -4.0, 4.0
+            for _ in range(40):
+                mid = (lo + hi) / 2
+                if norm_cdf(mid) < (1 - pct_receiving): lo = mid
+                else: hi = mid
+            threshold_z = (lo + hi) / 2
             rank_among_recipients = max(0, min(1,
                 (norm_cdf(combined_z) - (1 - pct_receiving)) / pct_receiving
             ))
@@ -3925,6 +3978,85 @@ def get_prediction(slug, u_lsat, u_gpa, user_state=None):
                     predicted_tier = 'lt_half'
 
     return aba_med, "adjusted ABA estimate", 0, predicted_tier
+
+
+def get_aba_prediction(slug, u_lsat, u_gpa, user_state=None):
+    """Pure ABA-only prediction: z-score → tier → interpolated dollar amount."""
+    import math
+    def norm_cdf(z): return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+    NO_MERIT_AID = {'harvard-law-school', 'stanford-law-school', 'yale-law-school'}
+    if slug in NO_MERIT_AID: return None, None, None
+
+    g   = grant_data.get(slug, {})
+    adm = admissions_data.get(slug, {})
+    si  = school_info.get(slug, {})
+
+    lsat25 = adm.get('lsat25'); lsat75 = adm.get('lsat75')
+    gpa25  = adm.get('gpa25');  gpa75  = adm.get('gpa75')
+    if not all([lsat25, lsat75, gpa25, gpa75]): return None, None, None
+
+    lsat_iqr = max(1, lsat75 - lsat25); gpa_iqr = max(0.01, gpa75 - gpa25)
+    lsat_z = (u_lsat - (lsat75 + lsat25) / 2) / (lsat_iqr / 1.35)
+    gpa_z  = (u_gpa  - (gpa75  + gpa25)  / 2) / (gpa_iqr  / 1.35)
+    combined_z = lsat_z * 0.7 + gpa_z * 0.3
+    if u_lsat > lsat75: combined_z += (u_lsat - lsat75) / lsat_iqr * 0.5
+    if u_gpa < gpa25:   combined_z -= (gpa25 - u_gpa)  / gpa_iqr  * 1.0
+    elif u_gpa < (gpa75 + gpa25) / 2:
+        combined_z -= ((gpa75 + gpa25) / 2 - u_gpa) / gpa_iqr * 0.4
+
+    pct_recv = (g.get('pct_receiving') or 0) / 100
+    if not pct_recv:
+        total_recv = sum(g.get(k) or 0 for k in ['gt_full_n','full_n','half_to_full_n','lt_half_n'])
+        total = g.get('total_students') or 0
+        pct_recv = (total_recv / total) if total > 0 else 0.75
+
+    # The z-score is centered on the class median, but aid recipients are
+    # the top pct_recv fraction of the class. The threshold z that separates
+    # aid recipients from non-recipients is norm_ppf(1 - pct_recv).
+    # So rank among recipients = (norm_cdf(z) - (1 - pct_recv)) / pct_recv,
+    # but we shift the z upward by the threshold so that z=0 → rank ≈ 0.5
+    # when the student is at the median of recipients (not the class median).
+    import math
+    # threshold z for bottom of aid-receiving population
+    # approx inverse normal: use the fact that norm_cdf(threshold) = 1 - pct_recv
+    # We shift combined_z relative to the threshold
+    threshold_pct = 1 - pct_recv
+    # Find threshold z via bisection
+    lo, hi = -4.0, 4.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if norm_cdf(mid) < threshold_pct: lo = mid
+        else: hi = mid
+    threshold_z = (lo + hi) / 2
+
+    # Rank among recipients: 0 = just barely gets aid, 1 = best applicant
+    raw_rank = (norm_cdf(combined_z) - threshold_pct) / pct_recv if pct_recv > 0 else 0
+    rank = max(0.0, min(1.0, raw_rank))
+
+    gt  = (g.get('gt_full_pct')     or 0) / 100
+    fp  = (g.get('full_pct')         or 0) / 100
+    hf  = (g.get('half_to_full_pct') or 0) / 100
+
+    is_instate = bool(user_state and slug in STATE_TO_PUBLIC_SCHOOLS.get(user_state, []))
+    _t = (si.get('tuition_res') if is_instate else None) or si.get('tuition') or si.get('tuition_res') or 0
+    full_3yr = _t * 3 if _t else None
+    if not full_3yr: return None, None, None
+
+    if rank >= (1 - gt) and gt > 0:
+        val = int(full_3yr * 1.1); tier = 'gt_full'
+    elif rank >= (1 - gt - fp) and (gt + fp) > 0:
+        val = full_3yr; tier = 'full'
+    elif rank >= (1 - gt - fp - hf):
+        bb = 1 - gt - fp - hf; bt = 1 - gt - fp
+        pos = (rank - bb) / (bt - bb) if bt > bb else 0.5
+        val = int(full_3yr * (0.5 + pos * 0.5)); tier = 'half_to_full'
+    else:
+        bt = 1 - gt - fp - hf
+        pos = rank / bt if bt > 0 else 0.5
+        val = int(full_3yr * pos * 0.5); tier = 'lt_half'
+
+    return val, tier, combined_z
 
 
 app = Dash(__name__, suppress_callback_exceptions=True)
@@ -4472,6 +4604,7 @@ visualizer_layout = html.Div([
             ),
             html.Div(style={"borderBottom": "1px solid #1e1e1e", "marginBottom": "6px"}),
             dcc.Store(id='school-dropdown', data=all_ranked_schools[0] if all_ranked_schools else None),
+            dcc.Store(id='pred-mode', data='knn'),
             dcc.Store(id='starred-schools', data=list(slug_map.keys())),
             html.Div(id='school-list')
         ], style={
@@ -4677,7 +4810,8 @@ visualizer_layout = html.Div([
                             value='CA',
                             clearable=True,
                             style={
-                                "width": "80px",
+                                "width": "100px",
+                                "minWidth": "100px",
                                 "fontSize": "16px",
                                 "fontWeight": "600",
                                 "fontFamily": "'DM Serif Display', serif",
@@ -4690,6 +4824,26 @@ visualizer_layout = html.Div([
                         ),
                     ], style={"flex": "0 0 auto"}),
                 ], style={"display": "flex", "gap": "8px", "alignItems": "flex-end"}),
+                html.Div([
+                    html.Div("MODEL", style={"fontSize": "9px", "color": "#555", "letterSpacing": "0.1em", "marginBottom": "4px"}),
+                    html.Div([
+                        html.Button("KNN", id='pred-mode-knn', n_clicks=0, style={
+                            "background": "#1a1a12", "border": "1px solid #c8a96e44",
+                            "color": "#c8a96e", "fontSize": "10px", "fontFamily": "'DM Sans', sans-serif",
+                            "padding": "3px 8px", "cursor": "pointer", "borderRadius": "4px 0 0 4px",
+                        }),
+                        html.Button("Surface", id='pred-mode-surface', n_clicks=0, style={
+                            "background": "#111", "border": "1px solid #2a2a2a",
+                            "color": "#555", "fontSize": "10px", "fontFamily": "'DM Sans', sans-serif",
+                            "padding": "3px 8px", "cursor": "pointer", "borderRadius": "0",
+                        }),
+                        html.Button("ABA", id='pred-mode-aba', n_clicks=0, style={
+                            "background": "#111", "border": "1px solid #2a2a2a",
+                            "color": "#555", "fontSize": "10px", "fontFamily": "'DM Sans', sans-serif",
+                            "padding": "3px 8px", "cursor": "pointer", "borderRadius": "0 4px 4px 0",
+                        }),
+                    ], style={"display": "flex"}),
+                ], style={"marginTop": "8px"}),
             ], style={
                 "backgroundColor": "#0f0f08",
                 "border": "1px solid #c8a96e33",
@@ -4722,6 +4876,52 @@ visualizer_layout = html.Div([
 
 # Keep visualizer always in DOM to avoid callback ID issues
 # Page routing just shows/hides via display style
+
+
+# --- PREDICTION MODE TOGGLE ---
+@app.callback(
+    Output('pred-mode', 'data'),
+    Output('pred-mode-knn', 'style'),
+    Output('pred-mode-surface', 'style'),
+    Output('pred-mode-aba', 'style'),
+    Output('cmp-model-knn', 'style'),
+    Output('cmp-model-surface', 'style'),
+    Output('cmp-model-aba', 'style'),
+    Input('pred-mode-knn', 'n_clicks'),
+    Input('pred-mode-surface', 'n_clicks'),
+    Input('pred-mode-aba', 'n_clicks'),
+    Input('cmp-model-knn', 'n_clicks'),
+    Input('cmp-model-surface', 'n_clicks'),
+    Input('cmp-model-aba', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def toggle_pred_mode(knn, surf, aba, cmp_knn, cmp_surf, cmp_aba):
+    t = ctx.triggered_id or 'pred-mode-knn'
+    if   'surface' in t: mode = 'surface'
+    elif 'aba'     in t: mode = 'aba'
+    else:                mode = 'knn'
+
+    def vis_btn(active, color, radius):
+        return {"background": "#1a1a12" if active else "#111",
+                "border": f"1px solid {color}44" if active else "1px solid #2a2a2a",
+                "color": color if active else "#555",
+                "fontSize": "10px", "fontFamily": "'DM Sans', sans-serif",
+                "padding": "3px 8px", "cursor": "pointer", "borderRadius": radius}
+
+    def cmp_btn(active, color, radius):
+        return {"background": "#1a1a12" if active else "#111",
+                "border": f"1px solid {color}44" if active else "1px solid #2a2a2a",
+                "color": color if active else "#555",
+                "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif",
+                "padding": "5px 10px", "cursor": "pointer", "borderRadius": radius}
+
+    return (mode,
+            vis_btn(mode=='knn',     '#c8a96e', '4px 0 0 4px'),
+            vis_btn(mode=='surface', '#7eb8f7', '0'),
+            vis_btn(mode=='aba',     '#aaaaaa', '0 4px 4px 0'),
+            cmp_btn(mode=='knn',     '#c8a96e', '4px 0 0 4px'),
+            cmp_btn(mode=='surface', '#7eb8f7', '0'),
+            cmp_btn(mode=='aba',     '#aaaaaa', '0 4px 4px 0'))
 
 
 # --- ROUTING CALLBACK ---
@@ -4801,20 +5001,13 @@ def build_comparison_layout():
                 ], style={"display": "flex", "gap": "6px"}),
             ], style={"marginRight": "16px"}),
 
-            # Prediction mode toggle (table only)
+            # Model toggle (same pred-mode store as visualizer)
             html.Div([
-                html.Div("PRED. AID", style=lbl_style),
+                html.Div("MODEL", style=lbl_style),
                 html.Div([
-                    html.Button("KNN", id='cmp-pred-knn', n_clicks=0, style={
-                        "background": "#1a1a12", "border": "1px solid #c8a96e44",
-                        "color": "#c8a96e", "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif",
-                        "padding": "5px 10px", "cursor": "pointer", "borderRadius": "4px 0 0 4px",
-                    }),
-                    html.Button("Surface", id='cmp-pred-surface', n_clicks=0, style={
-                        "background": "#111", "border": "1px solid #2a2a2a",
-                        "color": "#555", "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif",
-                        "padding": "5px 10px", "cursor": "pointer", "borderRadius": "0 4px 4px 0",
-                    }),
+                    html.Button("KNN",     id='cmp-model-knn',     n_clicks=0, style={"background": "#1a1a12", "border": "1px solid #c8a96e44", "color": "#c8a96e", "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif", "padding": "5px 10px", "cursor": "pointer", "borderRadius": "4px 0 0 4px"}),
+                    html.Button("Surface", id='cmp-model-surface',  n_clicks=0, style={"background": "#111",    "border": "1px solid #2a2a2a",    "color": "#555",    "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif", "padding": "5px 10px", "cursor": "pointer", "borderRadius": "0"}),
+                    html.Button("ABA",     id='cmp-model-aba',      n_clicks=0, style={"background": "#111",    "border": "1px solid #2a2a2a",    "color": "#555",    "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif", "padding": "5px 10px", "cursor": "pointer", "borderRadius": "0 4px 4px 0"}),
                 ], style={"display": "flex"}),
             ], style={"marginRight": "auto"}),
 
@@ -4842,10 +5035,79 @@ def build_comparison_layout():
 
         dcc.Store(id='cmp-sort-store', data='rank'),
         dcc.Store(id='cmp-sort-dir', data=1),
-        dcc.Store(id='cmp-pred-mode', data='knn'),
+        dcc.Store(id='cmp-filters-open', data=False),
         dcc.Store(id='cmp-selected-school', data=None),
         html.Div(id='cmp-stats', style={"padding": "5px 20px", "fontSize": "11px", "color": "#444",
                                          "borderBottom": "1px solid #111", "backgroundColor": "#0a0a0a"}),
+
+        # Filter bar
+        html.Div([
+            html.Button("▼ Filters", id='cmp-filter-toggle', n_clicks=0, style={
+                "background": "none", "border": "none", "color": "#555",
+                "fontSize": "11px", "cursor": "pointer", "fontFamily": "'DM Sans', sans-serif",
+                "letterSpacing": "0.05em", "padding": "6px 20px",
+            }),
+            html.Div([
+                # Rank range
+                html.Div([
+                    html.Div("RANK RANGE", style={"fontSize": "9px", "color": "#444", "letterSpacing": "0.1em", "marginBottom": "4px"}),
+                    html.Div([
+                        dcc.Input(id='cmp-filter-rank-min', type='number', min=1, max=999, step=1, value=1,
+                            placeholder="Min", style={"width": "60px", "background": "#111", "border": "1px solid #2a2a2a",
+                            "color": "#ccc", "borderRadius": "4px 0 0 4px", "padding": "4px 6px", "fontSize": "11px"}),
+                        html.Span("–", style={"color": "#444", "padding": "0 4px", "lineHeight": "28px"}),
+                        dcc.Input(id='cmp-filter-rank-max', type='number', min=1, max=999, step=1, value=999,
+                            placeholder="Max", style={"width": "60px", "background": "#111", "border": "1px solid #2a2a2a",
+                            "color": "#ccc", "borderRadius": "0 4px 4px 0", "padding": "4px 6px", "fontSize": "11px"}),
+                    ], style={"display": "flex", "alignItems": "center"}),
+                ], style={"flex": "0 0 auto"}),
+
+                # State filter
+                html.Div([
+                    html.Div("STATE", style={"fontSize": "9px", "color": "#444", "letterSpacing": "0.1em", "marginBottom": "4px"}),
+                    dcc.Dropdown(
+                        id='cmp-filter-state',
+                        options=[{"label": s, "value": s} for s in sorted(set(
+                            v.split(',')[-1].strip() for v in CITY_MAP.values() if ',' in v
+                        ))],
+                        value=None, multi=True, placeholder="All states…",
+                        style={"backgroundColor": "#111", "border": "1px solid #2a2a2a",
+                               "borderRadius": "4px", "fontSize": "11px", "minWidth": "160px"},
+                        className="state-dropdown",
+                    ),
+                ], style={"flex": "1", "minWidth": "160px"}),
+
+                # Predicted aid range
+                html.Div([
+                    html.Div("PRED. AID (3YR)", style={"fontSize": "9px", "color": "#444", "letterSpacing": "0.1em", "marginBottom": "4px"}),
+                    html.Div([
+                        html.Span("$", style={"color": "#444", "lineHeight": "28px", "marginRight": "2px"}),
+                        dcc.Input(id='cmp-filter-aid-min', type='number', min=0, max=500000, step=1000, value=0,
+                            placeholder="Min", style={"width": "80px", "background": "#111", "border": "1px solid #2a2a2a",
+                            "color": "#ccc", "borderRadius": "4px 0 0 4px", "padding": "4px 6px", "fontSize": "11px"}),
+                        html.Span("–", style={"color": "#444", "padding": "0 4px", "lineHeight": "28px"}),
+                        html.Span("$", style={"color": "#444", "lineHeight": "28px", "marginRight": "2px"}),
+                        dcc.Input(id='cmp-filter-aid-max', type='number', min=0, max=500000, step=1000, value=500000,
+                            placeholder="Max", style={"width": "80px", "background": "#111", "border": "1px solid #2a2a2a",
+                            "color": "#ccc", "borderRadius": "0 4px 4px 0", "padding": "4px 6px", "fontSize": "11px"}),
+                    ], style={"display": "flex", "alignItems": "center"}),
+                ], style={"flex": "0 0 auto"}),
+
+                # Reset button
+                html.Button("Reset", id='cmp-filter-reset', n_clicks=0, style={
+                    "background": "#111", "border": "1px solid #2a2a2a",
+                    "color": "#555", "fontSize": "10px", "padding": "4px 10px",
+                    "cursor": "pointer", "borderRadius": "4px",
+                    "fontFamily": "'DM Sans', sans-serif", "alignSelf": "flex-end",
+                }),
+            ], id='cmp-filter-body', style={
+                "display": "none",
+                "gap": "16px", "padding": "10px 20px 14px",
+                "backgroundColor": "#0a0a0a", "borderBottom": "1px solid #111",
+                "alignItems": "flex-end", "flexWrap": "wrap",
+            }),
+        ], style={"backgroundColor": "#0a0a0a"}),
+
         html.Div([
             dcc.Loading(
                 type='circle', color='#c8a96e',
@@ -4857,23 +5119,34 @@ def build_comparison_layout():
 
 
 # --- COMPARISON CALLBACKS ---
+
 @app.callback(
-    Output('cmp-pred-mode', 'data'),
-    Output('cmp-pred-knn', 'style'),
-    Output('cmp-pred-surface', 'style'),
-    Input('cmp-pred-knn', 'n_clicks'),
-    Input('cmp-pred-surface', 'n_clicks'),
+    Output('cmp-filter-body', 'style'),
+    Output('cmp-filter-toggle', 'children'),
+    Input('cmp-filter-toggle', 'n_clicks'),
     prevent_initial_call=True,
 )
-def toggle_cmp_pred_mode(knn_clicks, surf_clicks):
-    mode = 'surface' if ctx.triggered_id == 'cmp-pred-surface' else 'knn'
-    def btn(active, color, radius):
-        return {"background": "#1a1a12" if active else "#111",
-                "border": f"1px solid {color}44" if active else "1px solid #2a2a2a",
-                "color": color if active else "#555",
-                "fontSize": "11px", "fontFamily": "'DM Sans', sans-serif",
-                "padding": "5px 10px", "cursor": "pointer", "borderRadius": radius}
-    return mode, btn(mode=='knn', '#c8a96e', '4px 0 0 4px'), btn(mode=='surface', '#7eb8f7', '0 4px 4px 0')
+def toggle_filters(n):
+    open_ = n % 2 == 1
+    style = {"display": "flex" if open_ else "none",
+             "gap": "20px", "padding": "10px 20px 14px",
+             "backgroundColor": "#0a0a0a", "borderBottom": "1px solid #111",
+             "alignItems": "flex-start", "flexWrap": "wrap"}
+    label = "▲ Filters" if open_ else "▼ Filters"
+    return style, label
+
+
+@app.callback(
+    Output('cmp-filter-rank-min', 'value'),
+    Output('cmp-filter-rank-max', 'value'),
+    Output('cmp-filter-state', 'value'),
+    Output('cmp-filter-aid-min', 'value'),
+    Output('cmp-filter-aid-max', 'value'),
+    Input('cmp-filter-reset', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def reset_filters(_):
+    return 1, 999, None, 0, 500000
 
 
 @app.callback(
@@ -4943,7 +5216,7 @@ def update_cmp_detail(selected_slug, user_lsat, user_gpa, user_state):
     detail_style = {"flex": "0 0 48%", "overflowY": "auto", "height": "100%", "backgroundColor": "#080808", "padding": "0"}
 
     # Build the panel content for this school
-    title_children, panel_children = update_median_panel(selected_slug, user_lsat, user_gpa, user_state)
+    title_children, panel_children = update_median_panel(selected_slug, user_lsat, user_gpa, user_state, 'knn')
 
     detail_content = html.Div([
         # Header
@@ -4981,12 +5254,18 @@ def close_cmp_detail(n):
     Input('cmp-state-input', 'value'),
     Input('cmp-sort-store', 'data'),
     Input('cmp-sort-dir', 'data'),
-    Input('cmp-pred-mode', 'data'),
+    Input('pred-mode', 'data'),
+    Input('cmp-filter-rank-min', 'value'),
+    Input('cmp-filter-rank-max', 'value'),
+    Input('cmp-filter-state', 'value'),
+    Input('cmp-filter-aid-min', 'value'),
+    Input('cmp-filter-aid-max', 'value'),
     State('user-lsat', 'value'),
     State('user-gpa', 'value'),
     State('user-state', 'value'),
 )
-def update_cmp_table(pathname, cmp_lsat, cmp_gpa, cmp_state, sort_by, sort_dir, cmp_pred_mode,
+def update_cmp_table(pathname, cmp_lsat, cmp_gpa, cmp_state, sort_by, sort_dir, pred_mode,
+                     filter_rank_min, filter_rank_max, filter_state, filter_aid_min, filter_aid_max,
                      vis_lsat, vis_gpa, vis_state):
     if pathname != '/comparison':
         return no_update, no_update
@@ -5031,10 +5310,14 @@ def update_cmp_table(pathname, cmp_lsat, cmp_gpa, cmp_state, sort_by, sort_dir, 
         p25 = p50 = p75 = None
         if u_lsat and u_gpa:
             p25, p50, p75 = _predict(slug, u_lsat, u_gpa, is_instate)
-        if cmp_pred_mode == 'surface' and u_lsat and u_gpa:
+        if pred_mode == 'surface' and u_lsat and u_gpa:
             surf_val = lookup_surface(slug, u_lsat, u_gpa)
             if surf_val is not None:
                 p50 = surf_val
+        elif pred_mode == 'aba' and u_lsat and u_gpa:
+            aba_val, _, _ = get_aba_prediction(slug, u_lsat, u_gpa, state)
+            if aba_val is not None:
+                p50 = aba_val
 
 
 
@@ -5059,6 +5342,25 @@ def update_cmp_table(pathname, cmp_lsat, cmp_gpa, cmp_state, sort_by, sort_dir, 
             'net_tf': net_tf, 'net_coa': net_coa,
             '_sort': sort_key.get(sort_by or 'rank', rank or 999),
         })
+
+    # Apply filters
+    rank_min = filter_rank_min or 1
+    rank_max = filter_rank_max or 999
+    aid_min  = filter_aid_min  or 0
+    aid_max  = filter_aid_max  or 500000
+    def passes_filters(r):
+        rank_val = r.get('rank') or 999
+        if rank_val == 999:
+            if rank_max < 999: return False  # exclude NR if max < 999
+        elif not (rank_min <= rank_val <= rank_max):
+            return False
+        if filter_state and r.get('state', '') not in filter_state:
+            return False
+        pred_aid = r.get('pred') or 0
+        if not (aid_min <= pred_aid <= aid_max):
+            return False
+        return True
+    rows = [r for r in rows if passes_filters(r)]
 
     rows.sort(key=lambda r: r['_sort'], reverse=(sort_dir == -1))
 
@@ -5336,8 +5638,18 @@ def update_school_list_highlight(selected_slug, starred, user_lsat, user_gpa, se
     Input('user-lsat', 'value'),
     Input('user-gpa', 'value'),
     Input('user-state', 'value'),
+    Input('pred-mode', 'data'),
 )
-def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
+def update_median_panel(selected_slug, user_lsat, user_gpa, user_state, pred_mode):
+    try:
+        return _update_median_panel_inner(selected_slug, user_lsat, user_gpa, user_state, pred_mode)
+    except Exception as e:
+        import traceback
+        logging.error(f"update_median_panel crash for {selected_slug}:\n{traceback.format_exc()}")
+        return no_update, html.Div(f"Error loading panel: {str(e)}", style={"color": "#c85060", "fontSize": "12px"})
+
+
+def _update_median_panel_inner(selected_slug, user_lsat, user_gpa, user_state, pred_mode):
     name = full_slug_map.get(selected_slug) or slug_map.get(selected_slug) or selected_slug.replace('-', ' ').title() if selected_slug else "Law School Scholarship Visualizer"
     rank_info = rankings.get(selected_slug, {}) if selected_slug else {}
     rank_str = ""
@@ -5704,53 +6016,73 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         # Get predicted tier for highlighting
         pred_tier_for_grant = None
         if u_lsat and u_gpa:
-            _pred_val, _, _, pred_tier_for_grant = get_prediction(selected_slug, u_lsat, u_gpa, user_state)
-            # Don't highlight a tier if the prediction is zero (stats too low)
-            if not _pred_val:
+            _pred_val, _, _, _knn_tier = get_prediction(selected_slug, u_lsat, u_gpa, user_state)
+            if (pred_mode or 'knn') == 'aba':
+                try:
+                    _, _aba_tier, _ = get_aba_prediction(selected_slug, u_lsat, u_gpa, user_state)
+                    pred_tier_for_grant = _aba_tier
+                except Exception:
+                    pred_tier_for_grant = _knn_tier
+            else:
+                pred_tier_for_grant = _knn_tier
+            if not _pred_val and pred_tier_for_grant == _knn_tier:
                 pred_tier_for_grant = None
 
         bars = [
             ("Stipend",      "gt_full",      g["gt_full_n"],      g["gt_full_pct"],      "#c82060"),
             ("Full tuition", "full",          g["full_n"],          g["full_pct"],         "#c8921f"),
-            ("½ – full",     "half_to_full", g["half_to_full_n"], g["half_to_full_pct"], "#27a87c"),
+            ("More than half", "half_to_full", g["half_to_full_n"], g["half_to_full_pct"], "#27a87c"),
             ("< ½ tuition",  "lt_half",      g["lt_half_n"],      g["lt_half_pct"],      "#3a7fbf"),
             ("No aid",       None,            no_aid_n,             no_aid_pct,            "#555"),
         ]
-        max_pct = max((b[3] or 0) for b in bars) or 1
-        scale   = 60 / max_pct
 
         grant_items = [
             html.P(
-                f"{g['total_receiving']} of {total} ({g['pct_receiving']}%)",
-                style={"fontSize": "13px", "color": "#666", "margin": "0 0 8px"}
+                f"{g['total_receiving']} of {total} students receive aid ({g['pct_receiving']}%)",
+                style={"fontSize": "11px", "color": "#555", "margin": "0 0 10px", "fontStyle": "italic"}
             )
         ]
+
+        # Dot chart — each dot ≈ 1 student per 1% bucket (max 50 dots per row)
+        DOT_SCALE = 2  # 1 dot per DOT_SCALE percent
         for label, tier_key, n, pct, fill_color in bars:
-            n_str   = str(n) if n is not None else "—"
+            n_str = str(n) if n is not None else "—"
             pct_str = f"{pct}%" if pct is not None else "—"
-            bar_w   = round((pct or 0) * scale, 1)
             is_predicted = (pred_tier_for_grant and tier_key == pred_tier_for_grant)
-            row_style = {
-                "background": "rgba(200,169,110,0.08)",
-                "border": "1px solid #c8a96e55",
-                "borderRadius": "4px",
-                "padding": "2px 4px",
-                "marginBottom": "2px",
-            } if is_predicted else {}
-            label_el = html.Span([
-                label,
-                html.Span(" ← predicted", style={"fontSize": "9px", "color": "#c8a96e", "marginLeft": "4px"}) if is_predicted else None,
-            ], style={"fontSize": "14px"})
+
+            n_dots = max(1, round((pct or 0) / DOT_SCALE)) if pct else 0
+            dots = []
+            for i in range(n_dots):
+                dots.append(html.Span(style={
+                    "display": "inline-block",
+                    "width": "7px", "height": "7px",
+                    "borderRadius": "50%",
+                    "backgroundColor": fill_color,
+                    "margin": "1px",
+                    "opacity": "1.0" if is_predicted else "0.65",
+                }))
+
+            row_bg = "rgba(200,169,110,0.06)" if is_predicted else "transparent"
+            row_border = "1px solid #c8a96e33" if is_predicted else "1px solid transparent"
+
             grant_items.append(html.Div([
                 html.Div([
-                    label_el,
-                    html.Span(f"{n_str} ({pct_str})", style={"fontSize": "13px"}),
-                ], className="grant-bar-label"),
-                html.Div(
-                    html.Div(style={"width": f"{bar_w}%", "background": fill_color, "height": "100%", "borderRadius": "4px"}),
-                    className="grant-bar-track", style={"background": "#1e1e1e"}
-                )
-            ], className="grant-bar-row", style=row_style))
+                    html.Span(label, style={
+                        "fontSize": "10px", "color": "#c8a96e" if is_predicted else fill_color,
+                        "fontWeight": "600" if is_predicted else "400",
+                        "minWidth": "80px", "display": "inline-block",
+                    }),
+                    html.Span(f"{n_str}", style={"fontSize": "10px", "color": "#555", "marginRight": "4px"}),
+                    html.Span(f"({pct_str})", style={"fontSize": "9px", "color": "#333"}),
+                    html.Span(" ← you", style={"fontSize": "9px", "color": "#c8a96e", "marginLeft": "6px"}) if is_predicted else None,
+                ], style={"display": "flex", "alignItems": "center", "marginBottom": "3px"}),
+                html.Div(dots, style={"display": "flex", "flexWrap": "wrap", "marginBottom": "6px"}),
+            ], style={
+                "background": row_bg,
+                "border": row_border,
+                "borderRadius": "4px",
+                "padding": "4px 6px",
+            }))
 
         if any(g[k] for k in ["p25", "p50", "p75"]):
             grant_items.append(html.Div([
@@ -5808,6 +6140,7 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
 
         NO_MERIT_SLUGS = {'harvard-law-school', 'stanford-law-school', 'yale-law-school'}
         surf_pred = None
+        aba_only_pred = None
         if u_lsat and u_gpa:
             pred_med, source_label, n_nearby, pred_tier = get_prediction(selected_slug, u_lsat, u_gpa, user_state)
             if pred_med:
@@ -5837,14 +6170,38 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         # Use prediction if available
         use_knn = pred_med is not None and source_label and 'lsd.law' in source_label
         _aba_p50 = (g.get("p50") or 0) * 3 or None
-        show_p25 = pred_p25 if pred_med else aba_p25
+
+        # Compute ABA and surface predictions upfront so they're available for show_med
+        aba_only_pred = None
+        surf_pred = None
+        if u_lsat is not None and u_gpa is not None and selected_slug not in NO_MERIT_SLUGS:
+            try:
+                aba_only_val, aba_only_tier, aba_only_z = get_aba_prediction(selected_slug, u_lsat, u_gpa, user_state)
+                aba_only_pred = aba_only_val
+            except Exception:
+                aba_only_pred = None
+
+            try:
+                surf_pred = lookup_surface(selected_slug, u_lsat, u_gpa)
+            except Exception:
+                surf_pred = None
+
         if selected_slug in NO_MERIT_SLUGS:
-            show_med = pred_med
+            show_med = None
         else:
             show_med = pred_med if pred_med is not None else _aba_p50
 
+        # active_pred drives YOUR COST — uses the selected model
+        if selected_slug in NO_MERIT_SLUGS:
+            active_pred = None
+        elif (pred_mode or 'knn') == 'surface' and surf_pred is not None:
+            active_pred = surf_pred
+        elif (pred_mode or 'knn') == 'aba' and aba_only_pred is not None:
+            active_pred = aba_only_pred
+        else:
+            active_pred = show_med
 
-
+        show_p25 = pred_p25 if pred_med else aba_p25
         show_p75 = pred_p75 if pred_med else aba_p75
 
         # Scale p25/p75 proportionally whenever the median was adjusted
@@ -5869,17 +6226,12 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
         pred_items = []
         if show_med is not None:
 
-            net_med_tf  = (_tf_3yr  - show_med) if (_tf_3yr  and show_med) else None
+            net_med_tf  = (_tf_3yr  - active_pred) if (_tf_3yr  and active_pred) else None
             net_p25_tf  = (_tf_3yr  - show_p75) if (_tf_3yr  and show_p75) else None
-            net_med_coa = (_coa_3yr - show_med) if (_coa_3yr and show_med) else None
+            net_med_coa = (_coa_3yr - active_pred) if (_coa_3yr and active_pred) else None
 
-            # Compute surface prediction now so it's available for the p25/median/p75 row
-            surf_pred = None
-            if u_lsat is not None and u_gpa is not None and selected_slug not in NO_MERIT_SLUGS:
-                try:
-                    surf_pred = lookup_surface(selected_slug, u_lsat, u_gpa)
-                except Exception:
-                    surf_pred = None
+            # ABA and surface already computed above for show_med selection
+            # --- Compute surface prediction for p25/median/p75 row display ---
 
             # Surface computed above, used in pred_items below
 
@@ -5888,22 +6240,39 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                     source_label if use_knn else f"ABA 509 grant data ({aba_pct:.0f}% of students receive aid)" if aba_pct else "ABA 509 grant data",
                     style={"fontSize": "10px", "color": "#444", "marginBottom": "8px", "fontStyle": "italic"}
                 ),
-                # Surface prediction centered above median
+                # Surface and ABA predictions above the p25/median/p75 row
                 html.Div([
-                    html.Div("Surface Prediction", style={"fontSize": "9px", "color": "#7eb8f7", "textAlign": "center"}),
-                    html.Div(
-                        fmt_k(surf_pred) if surf_pred is not None else "",
-                        style={"fontSize": "13px", "color": "#7eb8f7", "textAlign": "center", "fontWeight": "600"}
-                    ),
-                ], style={"display": "flex", "flexDirection": "column", "alignItems": "center",
-                          "marginBottom": "4px"}) if surf_pred is not None else None,
+                    html.Div([
+                        html.Div("Surface Prediction", style={"fontSize": "9px",
+                            "color": "#7eb8f7" if pred_mode == 'surface' else "#3a6a8a",
+                            "textAlign": "center",
+                            "fontWeight": "700" if pred_mode == 'surface' else "400"}),
+                        html.Div(
+                            fmt_k(surf_pred) if surf_pred is not None else "",
+                            style={"fontSize": "13px", "color": "#7eb8f7", "textAlign": "center", "fontWeight": "600"}
+                        ),
+                    ], style={"flex": "1"}) if surf_pred is not None else None,
+                    html.Div([
+                        html.Div("ABA Model", style={"fontSize": "9px",
+                            "color": "#aaaaaa" if (pred_mode or 'knn') == 'aba' else "#444",
+                            "textAlign": "center",
+                            "fontWeight": "700" if (pred_mode or 'knn') == 'aba' else "400"}),
+                        html.Div(
+                            fmt_k(aba_only_pred) if aba_only_pred else "$0",
+                            style={"fontSize": "13px", "color": "#aaaaaa", "textAlign": "center", "fontWeight": "600"}
+                        ),
+                    ], style={"flex": "1"}) if aba_only_pred is not None else None,
+                ], style={"display": "flex", "gap": "4px", "marginBottom": "6px"}),
                 html.Div([
                     html.Div([
                         html.Div("25th", style={"fontSize": "9px", "color": "#555", "textAlign": "center"}),
                         html.Div(fmt_k(show_p25), style={"fontSize": "15px", "color": "#ccc", "textAlign": "center", "fontWeight": "500"}),
                     ], style={"flex": "1"}),
                     html.Div([
-                        html.Div("KNN Median", style={"fontSize": "9px", "color": "#555", "textAlign": "center"}),
+                        html.Div("KNN Median", style={"fontSize": "9px",
+                            "color": "#c8a96e" if (pred_mode or 'knn') == 'knn' else "#555",
+                            "textAlign": "center",
+                            "fontWeight": "700" if (pred_mode or 'knn') == 'knn' else "400"}),
                         html.Div(fmt_k(show_med), style={"fontSize": "20px", "color": "#c8a96e", "textAlign": "center", "fontWeight": "700"}),
                     ], style={"flex": "1"}),
                     html.Div([
@@ -5937,7 +6306,7 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                 if not _t_3yr and not _f_3yr:
                     _t_3yr = _tf_3yr  # fallback if no split available
                 net_tf  = max(0, _tf_3yr - show_med)
-                aid_pct = min(100, show_med / _tf_3yr * 100)
+                aid_pct = min(100, active_pred / _tf_3yr * 100)
                 living_3yr = (_si.get("living") or 0) * 3 if _si else 0
                 grand_total = net_tf + living_3yr
 
@@ -5964,7 +6333,7 @@ def update_median_panel(selected_slug, user_lsat, user_gpa, user_state):
                     }),
                     cost_line("Tuition (3yr)", _t_3yr if _t_3yr else _tf_3yr),
                     cost_line("Fees (3yr)", _f_3yr if _f_3yr else None) if _f_3yr else None,
-                    cost_line("– Aid", -show_med, "#c8a96e"),
+                    cost_line("– Aid", -active_pred, "#c8a96e"),
                     divider(),
                     # Bar
                     html.Div([
@@ -6075,8 +6444,18 @@ def update_reset_store(n):
     Input('lsat-range', 'value'),
     Input('gpa-range', 'value'),
     Input('schol-range', 'value'),
+    Input('pred-mode', 'data'),
 )
-def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_state, lsat_range, gpa_range, schol_range):
+def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_state, lsat_range, gpa_range, schol_range, pred_mode):
+    try:
+        return _update_graph_inner(selected_slug, user_lsat, user_gpa, overlays, _reset, user_state, lsat_range, gpa_range, schol_range, pred_mode)
+    except Exception as e:
+        import traceback
+        logging.error(f"update_graph crash for {selected_slug}:\n{traceback.format_exc()}")
+        return go.Figure()
+
+
+def _update_graph_inner(selected_slug, user_lsat, user_gpa, overlays, _reset, user_state, lsat_range, gpa_range, schol_range, pred_mode=None):
     overlays = overlays or []
     if not selected_slug:
         return px.scatter_3d()
@@ -6110,7 +6489,10 @@ def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_stat
 
     # --- SURFACE VIEW ---
     if 'surface_view' in overlays:
-        result = compute_surface(selected_slug)
+        try:
+            result = compute_surface(selected_slug)
+        except Exception:
+            result = None
         if result is not None:
             xi, yi, Zi = result
             fig = go.Figure(data=[go.Surface(
@@ -6296,6 +6678,18 @@ def update_graph(selected_slug, user_lsat, user_gpa, overlays, _reset, user_stat
     # --- PREDICTED SCHOLARSHIP DOT + RANGE ---
     if user_lsat is not None and user_gpa is not None:
         dot_pred, dot_label, _, _dot_tier = get_prediction(selected_slug, user_lsat, user_gpa, user_state)
+
+        # Override dot_pred with the active model's prediction
+        if (pred_mode or 'knn') == 'surface':
+            try:
+                _surf = lookup_surface(selected_slug, user_lsat, user_gpa)
+                if _surf is not None: dot_pred = _surf; dot_label = 'surface model'
+            except Exception: pass
+        elif (pred_mode or 'knn') == 'aba':
+            try:
+                _aba_v, _, _ = get_aba_prediction(selected_slug, user_lsat, user_gpa, user_state)
+                if _aba_v is not None: dot_pred = _aba_v; dot_label = 'ABA model'
+            except Exception: pass
         if dot_pred is not None:
             clamped_pred = max(z_min, min(dot_pred, z_max))
             # Color dot based on median position
@@ -6393,9 +6787,10 @@ if __name__ == '__main__':
     try:
         app.run(debug=True)
     except Exception as e:
-        import traceback
+        error_msg = traceback.format_exc()
+        logging.error(f"App run error:\n{error_msg}")
         print("\n" + "="*60)
         print("CRASH:")
         print("="*60)
-        traceback.print_exc()
+        print(error_msg)
         input("\nPress Enter to close.")
